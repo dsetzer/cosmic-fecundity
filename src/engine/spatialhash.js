@@ -58,45 +58,6 @@ export class SpatialHash {
     return c;
   }
 
-  /** Collect the item indices stored in one cell. */
-  cellItems(c, out) {
-    out.length = 0;
-    let i = this.heads[c];
-    while (i !== -1) {
-      out.push(i);
-      i = this.next[i];
-    }
-    return out;
-  }
-
-  /** Iterate every item in the cell containing (x, y) and its 8 neighbours. */
-  forEachNear(x, y, fn) {
-    const gx = Math.floor((x + this.extent) / this.cell);
-    const gy = Math.floor((y + this.extent) / this.cell);
-    for (let oy = -1; oy <= 1; oy++) {
-      const ry = gy + oy;
-      if (ry < 0 || ry >= this.dim) continue;
-      for (let ox = -1; ox <= 1; ox++) {
-        const rx = gx + ox;
-        if (rx < 0 || rx >= this.dim) continue;
-        let i = this.heads[ry * this.dim + rx];
-        while (i !== -1) {
-          fn(i);
-          i = this.next[i];
-        }
-      }
-    }
-  }
-
-  /** World-space centre of a cell index. */
-  cellCentre(c, out) {
-    const gx = c % this.dim;
-    const gy = (c / this.dim) | 0;
-    out.x = (gx + 0.5) * this.cell - this.extent;
-    out.y = (gy + 0.5) * this.cell - this.extent;
-    return out;
-  }
-
   /**
    * Cells whose accumulated mass exceeds `threshold`, densest first.
    * This is the star-formation trigger: a molecular cloud that has cooled and

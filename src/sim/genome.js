@@ -76,8 +76,6 @@ export const GENES = [
   },
 ];
 
-export const GENE_KEYS = GENES.map((g) => g.key);
-
 function clampGene(spec, v) {
   return v < spec.lo ? spec.lo : v > spec.hi ? spec.hi : v;
 }
@@ -106,17 +104,6 @@ export function mutate(parent, rng, rate = 1) {
   return g;
 }
 
-/** Human-readable divergence between two genomes, 0 = identical. */
-export function genomeDistance(a, b) {
-  let sum = 0;
-  for (const spec of GENES) {
-    const range = spec.hi - spec.lo;
-    const d = (a[spec.key] - b[spec.key]) / range;
-    sum += d * d;
-  }
-  return Math.sqrt(sum / GENES.length);
-}
-
 /**
  * Descriptive only — never fed back into the simulation. Reproductive success
  * is measured, not assigned: it is literally the number of singularities the
@@ -124,8 +111,4 @@ export function genomeDistance(a, b) {
  */
 export function fecundity(u) {
   return u.blackHolesFormed / Math.max(1, u.age / 60);
-}
-
-export function formatGenome(g) {
-  return GENES.map((s) => `${s.symbol} ${g[s.key].toFixed(2)}`).join('  ');
 }

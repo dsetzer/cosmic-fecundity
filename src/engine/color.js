@@ -38,14 +38,6 @@ export function rgb(c, a = 1) {
   return a >= 1 ? `rgb(${c[0]},${c[1]},${c[2]})` : `rgba(${c[0]},${c[1]},${c[2]},${a})`;
 }
 
-export function mixRGB(a, b, t) {
-  return [
-    Math.round(a[0] + (b[0] - a[0]) * t),
-    Math.round(a[1] + (b[1] - a[1]) * t),
-    Math.round(a[2] + (b[2] - a[2]) * t),
-  ];
-}
-
 /** Hue for a generation index — each lineage depth gets its own tint. */
 export function generationColor(gen) {
   const hues = [
@@ -105,27 +97,6 @@ export class SpriteCache {
     }
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, px, px);
-    this.map.set(key, c);
-    return c;
-  }
-
-  /** Anisotropic streak used for jets and umbilical flux. */
-  streak(color, w = 48, h = 12) {
-    const key = `s${color[0]}_${color[1]}_${color[2]}_${w}_${h}`;
-    let c = this.map.get(key);
-    if (c) return c;
-    c = document.createElement('canvas');
-    c.width = w;
-    c.height = h;
-    const ctx = c.getContext('2d');
-    const grad = ctx.createLinearGradient(0, 0, w, 0);
-    grad.addColorStop(0, `rgba(${color[0]},${color[1]},${color[2]},0)`);
-    grad.addColorStop(0.45, `rgba(${color[0]},${color[1]},${color[2]},0.9)`);
-    grad.addColorStop(1, `rgba(${color[0]},${color[1]},${color[2]},0)`);
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, h * 0.5 - 0.5, w, 1);
-    ctx.filter = 'blur(2px)';
-    ctx.drawImage(c, 0, 0);
     this.map.set(key, c);
     return c;
   }

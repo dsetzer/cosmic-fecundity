@@ -26,7 +26,6 @@ export class Renderer {
     this.sprites = new SpriteCache();
     this.bloom = document.createElement('canvas');
     this.bloomCtx = this.bloom.getContext('2d');
-    this.stars = null; // background starfield, regenerated on resize
     this.showLabels = true;
     this.showUmbilicals = true;
     this.bloomStrength = 0.45;
@@ -36,7 +35,6 @@ export class Renderer {
     this.quality = 0;
     this._slow = 0;
     this.time = 0;
-    this.hover = null;
     this.pickables = [];
     this.resize();
   }
@@ -590,5 +588,3 @@ export class Renderer {
     return best;
   }
 }
-
-export { blackbody };

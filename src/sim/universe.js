@@ -161,10 +161,6 @@ export class Universe {
     return this.phase !== PHASE.DISSOLVING || this._dissolveT < 1;
   }
 
-  get particleCount() {
-    return this.pool.count;
-  }
-
   /** Inward acceleration per unit radius: curvature minus vacuum energy.
    *  Negative means the universe is unbound and will simply disperse. */
   get binding() {
@@ -589,7 +585,7 @@ export class Universe {
     p.temp[i] = 1400 + 27000 * Math.pow(h / Math.max(h, r), 1.4);
   }
 
-  /** Handle end-of-life for a particle. Returns true if the slot was freed. */
+  /** Handle end-of-life for a particle: recycle its species, or bank its mass. */
   _expire(i, t) {
     const p = this.pool;
     if (t === PT.PHOTON) {
@@ -598,7 +594,7 @@ export class Universe {
       // medium the same mass — molecular clouds stay meaningful.
       this.reservoir += p.mass[i];
       p.kill(i);
-      return true;
+      return;
     }
     if (t === PT.INFLATON || t === PT.JET) {
       p.retype(i, PT.GAS);
@@ -608,11 +604,10 @@ export class Universe {
       p.size[i] = 1.6;
       p.vx[i] *= 0.35;
       p.vy[i] *= 0.35;
-      return false;
+      return;
     }
     this.reservoir += p.mass[i];
     p.kill(i);
-    return true;
   }
 
   // ------------------------------------------------------------ star formation
@@ -899,7 +894,6 @@ export class Universe {
         if (this.parent && this.parentBH) {
           this.parentBH.inflow += rate;
           this.massReturned += rate;
-          ctx.transfer(this, this.parent, rate);
         } else {
           this._emitJet(bh, rate);
         }

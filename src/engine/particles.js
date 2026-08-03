@@ -32,8 +32,6 @@ export class ParticlePool {
     this.size = new Float32Array(capacity);
     this.type = new Uint8Array(capacity);
     this.alive = new Uint8Array(capacity);
-    // `target` is an umbilical index for FLUX particles; -1 when unused.
-    this.target = new Int16Array(capacity);
     // Object slot, used by ACCRETION particles to hold the black hole they are
     // spiralling into. Kept out of the typed arrays deliberately: the disc has
     // to follow a specific hole across merges, not "whichever is nearest".
@@ -54,16 +52,14 @@ export class ParticlePool {
     this.byType = new Uint32Array(PT_COUNT);
   }
 
-  get pressure() {
-    return this.count / this.softCap;
-  }
-
   /**
    * Allocate a particle. Returns its index, or -1 when the pool is saturated —
    * callers treat -1 as back-pressure rather than an error, which is what keeps
-   * the whole multiverse inside a fixed memory budget.
+   * the whole multiverse inside a fixed memory budget. Species that need to
+   * remember an object (an accretion disc's hole, an umbilical's destination)
+   * set `ref[i]` after the call.
    */
-  spawn(type, x, y, vx, vy, mass, temp, size, life = 0, target = -1) {
+  spawn(type, x, y, vx, vy, mass, temp, size, life = 0) {
     if (this.freeCount === 0 || this.count >= this.softCap) return -1;
     const i = this.freeList[--this.freeCount];
     this.x[i] = x;
@@ -76,7 +72,6 @@ export class ParticlePool {
     this.age[i] = 0;
     this.life[i] = life;
     this.type[i] = type;
-    this.target[i] = target;
     this.alive[i] = 1;
     this.count++;
     this.byType[type]++;

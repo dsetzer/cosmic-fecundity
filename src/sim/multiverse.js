@@ -98,11 +98,6 @@ export class Multiverse {
     const ctx = {
       canBirth: (u) => this._canBirth(u),
       birth: (u, bh, dowry) => this._birth(u, bh, dowry),
-      transfer: (from, to, m) => {
-        void from;
-        void to;
-        void m;
-      },
     };
 
     this._layout();
@@ -381,5 +376,3 @@ export class Multiverse {
     return out;
   }
 }
-
-export { MAX_ACTIVE };
