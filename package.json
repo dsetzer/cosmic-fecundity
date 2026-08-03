@@ -1,0 +1,17 @@
+{
+  "name": "cosmic-fecundity",
+  "version": "1.0.0",
+  "description": "A perpetual particle-engine simulation of cosmological natural selection: stars collapse into black holes, black holes bounce into pocket universes, and parent holes feed their offspring forever.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "python3 -m http.server 8123",
+    "build": "node tools/build.mjs",
+    "test": "node tools/soak.mjs 6",
+    "soak": "node tools/soak.mjs 30",
+    "shot": "node tools/shot.mjs 45 dist/shots/scene.png 60"
+  },
+  "devDependencies": {
+    "playwright": "1.49.1"
+  }
+}

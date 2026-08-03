@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Cosmic Fecundity — a perpetual multiverse</title>
+    <meta
+      name="description"
+      content="A particle-engine simulation of cosmological natural selection: stars collapse into black holes, black holes bounce into pocket universes, and parent holes feed their offspring forever."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%230a0a12'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%23ffd9a0' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='16' r='4.5' fill='%23000'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="./styles/main.css" />
+  </head>
+  <body>
+    <canvas id="scene"></canvas>
+
+    <div id="ui">
+      <!-- ---------------------------------------------------------- left rail -->
+      <aside class="rail rail-left" id="rail-left">
+        <header class="brand">
+          <h1>Cosmic&nbsp;Fecundity</h1>
+          <p class="sub">
+            Stars collapse. Singularities bounce. Each new universe inherits its parent's constants —
+            with a nudge. The fecund ones inherit the multiverse.
+          </p>
+        </header>
+
+        <section class="panel" id="panel-focus">
+          <h2>Focused universe</h2>
+          <div class="focus-head">
+            <span class="uid" id="focus-id">U0</span>
+            <span class="pill" id="focus-gen">generation 0</span>
+            <span class="pill" id="focus-phase">Inflation</span>
+          </div>
+          <div class="stat-row" id="focus-stats"></div>
+          <h3>Physical constants <span class="hint">inherited, then mutated</span></h3>
+          <div class="genes" id="focus-genes"></div>
+        </section>
+
+        <section class="panel" id="panel-census">
+          <h2>Multiverse census</h2>
+          <div class="stat-grid" id="census"></div>
+          <div class="ledger" id="ledger"></div>
+        </section>
+      </aside>
+
+      <!-- --------------------------------------------------------- right rail -->
+      <aside class="rail rail-right" id="rail-right">
+        <section class="panel" id="panel-selection">
+          <h2>Selection <span class="hint">no fitness function is applied</span></h2>
+          <p class="explain">
+            Drift of the mean constants from the founding universe to the newest generations.
+            Universes that make more black holes simply leave more descendants.
+          </p>
+          <div class="drift" id="drift"></div>
+          <div class="legend">
+            <span><i class="sw up"></i>▲ higher than founder</span>
+            <span><i class="sw down"></i>▼ lower than founder</span>
+          </div>
+        </section>
+
+        <section class="panel" id="panel-yield">
+          <h2>Collapse rate <span class="hint">per universe-minute, by generation</span></h2>
+          <div id="spark"></div>
+          <p class="explain" id="yield-note"></p>
+        </section>
+
+        <section class="panel" id="panel-tree">
+          <h2>Lineage</h2>
+          <div class="tree" id="tree"></div>
+        </section>
+
+        <section class="panel" id="panel-log">
+          <h2>Events</h2>
+          <ul class="log" id="log"></ul>
+        </section>
+      </aside>
+
+      <!-- ---------------------------------------------------------- transport -->
+      <div class="transport" id="transport">
+        <button id="btn-play" class="tbtn" title="Play / pause (Space)"><span>❚❚</span></button>
+        <label class="speed">
+          <span id="speed-label">1.0×</span>
+          <input id="speed" type="range" min="0" max="60" value="20" />
+        </label>
+        <button id="btn-up" class="tbtn wide" title="Ascend to parent universe (Backspace)">↑ ascend</button>
+        <button id="btn-fittest" class="tbtn wide" title="Jump to the most fecund universe (F)">◎ fittest</button>
+        <button id="btn-labels" class="tbtn wide" title="Toggle labels (L)">labels</button>
+        <button id="btn-ui" class="tbtn wide" title="Hide interface (H)">hide&nbsp;ui</button>
+        <label class="seed">
+          <input id="seed" type="text" value="fecundity" spellcheck="false" />
+          <button id="btn-reset" class="tbtn wide" title="Restart from this seed (R)">restart</button>
+        </label>
+      </div>
+
+      <div class="hint-bar" id="hint-bar">
+        click a black hole to dive into the universe it created · scroll to zoom · drag to pan
+      </div>
+    </div>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
