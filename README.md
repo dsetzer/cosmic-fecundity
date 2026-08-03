@@ -39,11 +39,8 @@ their gene values are over-represented in the census of universes ever born.
 `fecundity()` in `src/sim/genome.js` is descriptive only — it is read by the HUD and by the
 recycling policy for choosing which spent branch to reclaim, never by the physics.
 
-**Does the drift actually show up?** Not yet, at the timescales you can watch. See
-[Does selection actually bite?](#does-selection-actually-bite) — the honest answer is that
-the *mechanism* is real and running, but over a quarter of an hour the multiverse only gets
-two or three generations deep, and the measured gene drift is not separable from mutation
-noise. `tools/selection.mjs` is there so you can check that claim rather than take it.
+**Does the drift actually show up?** See [Measuring it](#measuring-it) — there are two
+tools for answering that, and the answer is more interesting than a yes or a no.
 
 ## Running it
 
@@ -139,7 +136,7 @@ particle budget and its neighbours are throttled, so the frame cost stays flat n
 large the tree grows. Trimmed particles bank their mass in the vacuum rather than vanishing,
 which is why throttling doesn't perturb the ledger.
 
-## Verifying it
+## Measuring it
 
 ```bash
 npm test                # 6 simulated minutes, headless, asserts the invariants
@@ -149,8 +146,51 @@ node tools/soak.mjs 30 "another seed"
 
 The soak test runs the simulation with no renderer and fails on non-finite mass, on drift
 beyond 0.1% of the initial mass, on a sterile multiverse, on population collapse, or on the
-particle population dying out. It also prints the full generational census, so gene drift is
-inspectable from the terminal.
+particle population dying out. It also prints the full generational census.
+
+### The fitness landscape
+
+A drift in the census only means something if the gene actually changes how many
+singularities a universe produces. `tools/sweep.mjs` measures that directly: it holds the
+founding genome fixed, varies one gene across its full range, runs isolated universes that
+cannot reproduce, and counts collapses per minute.
+
+```bash
+node tools/sweep.mjs all 2 3 6      # every gene, 2 min, 3 seeds, 6 steps
+node tools/sweep.mjs ignition 3 4 8
+```
+
+Two genes carry almost the entire landscape, and the founding genome sits on both slopes:
+
+| gene | collapses/min across the range | shape |
+|---|---|---|
+| `ρ★` ignition threshold | 7.8 → 3.2 → 0.2 → 0 → 0 → 0 | steep, monotone; above ~1.5 nothing forms |
+| `M𝒸` collapse limit | 2.7 → 2.7 → 2.7 → 1.2 → 0.2 → 0 | flat, then a cliff once the limit passes the mean stellar mass |
+| `Λ` vacuum energy | non-monotone, noisy | high Λ makes many small stars, few of which collapse |
+| `G`, `κ`, `η` | flat within noise | no gradient for selection to climb |
+
+That table is what makes the selection panel interpretable. Drift in `ρ★` or `M𝒸` is a
+result; drift in `G`, `κ` or `η` is noise, because there is nothing there to select on.
+
+### Whether selection actually bites
+
+```bash
+node tools/selection.mjs 25 8 mybatch    # minutes, seeds, seed prefix
+```
+
+A single run is mostly mutation noise — a handful of universes per generation. This pools
+independent seeds and reports, per gene, how far the population mean moved as a fraction of
+that gene's range, the spread across seeds, a t-statistic, and how many seeds agreed on the
+direction.
+
+**Use a different seed prefix for each batch.** Batches sharing a prefix share seeds, so a
+second run contains the first rather than replicating it — an agreement between them is not
+evidence. (This bit me: an early "reproduced" result was two overlapping batches.)
+
+Finding a signal here needs the reproductive differential to survive into the census. The
+per-universe offspring cap is a memory bound and is deliberately set high enough not to
+bind, because a low cap silently discards the entire differential — a universe producing
+eight collapses a minute and one producing two both stop at the same number of children.
 
 ```bash
 node tools/shot.mjs 45 dist/shots/scene.png 60    # headless screenshot
@@ -162,9 +202,10 @@ DIVE=1 node tools/shot.mjs 45 dist/shots/child.png 60
 - The physics is *phenomenological*, not a cosmology code. Gravity is solved between
   particles and bodies plus a grid-resolution self-gravity term; the cosmological potential
   is harmonic; accretion is kinematic. It is tuned to be legible and stable, not predictive.
-- Selection is real but the sample is small — a handful of universes per generation. The
-  drift you see over ten minutes is a genuine signal riding on a lot of mutation noise, and
-  individual runs will disagree. Compare seeds before concluding anything about a gene.
+- Selection is real but the sample is small — a couple of dozen universes per seed over
+  twenty-five minutes, two or three generations deep. Individual runs disagree. Pool seeds
+  with `tools/selection.mjs` and check the gene against the sweep before concluding
+  anything; a drift in a gene with a flat landscape is noise by construction.
 - The collapse-rate chart is normalised per universe-minute precisely because deeper
   generations are younger; comparing raw totals would read that age difference as a
   difference in fecundity.

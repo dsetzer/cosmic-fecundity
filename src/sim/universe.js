@@ -63,8 +63,15 @@ const BARREN_WINDOW = 110;
 
 /** Reservoir a black hole must bank before it can bounce into a new universe. */
 export const BIRTH_COST = 155;
-const MAX_CHILDREN_PER_BH = 3;
-const MAX_CHILDREN_PER_UNIVERSE = 3;
+/**
+ * Offspring caps. These are a memory bound, and they must not bind in practice:
+ * a low cap silently throws away the entire selective differential, because a
+ * universe producing eight singularities a minute and one producing two both
+ * stop at the same number of children. What limits the population is the
+ * multiverse's own census and its recycling of spent branches, not this.
+ */
+const MAX_CHILDREN_PER_BH = 6;
+const MAX_CHILDREN_PER_UNIVERSE = 10;
 
 export const PHASE = {
   INFLATION: 0,
