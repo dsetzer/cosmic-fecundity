@@ -58,17 +58,6 @@ export class SpatialHash {
     return c;
   }
 
-  /** Collect the item indices stored in one cell. */
-  cellItems(c, out) {
-    out.length = 0;
-    let i = this.heads[c];
-    while (i !== -1) {
-      out.push(i);
-      i = this.next[i];
-    }
-    return out;
-  }
-
   /**
    * Cells whose accumulated mass exceeds `threshold`, densest first.
    * This is the star-formation trigger: a molecular cloud that has cooled and

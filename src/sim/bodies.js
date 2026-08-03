@@ -19,12 +19,9 @@ export class Star {
     this.vy = vy;
     this.mass = mass;
     this.age = 0;
-    /** Acceleration from the universe's force solve, applied by the caller. */
-    this.ax = 0;
-    this.ay = 0;
     // Massive stars burn their fuel disproportionately fast. This is what makes
     // a high-mass universe a fast-turnover universe.
-    this.lifespan = 90 * Math.pow(24 / mass, 1.2) * rng.range(0.75, 1.3);
+    this.lifespan = 26 * Math.pow(14 / mass, 1.35) * rng.range(0.75, 1.3);
     this.radius = 5 + Math.pow(mass, 0.55) * 1.9;
     this.temp = 2600 + Math.pow(mass, 1.25) * 340;
     this.color = blackbody(this.temp);
@@ -41,6 +38,8 @@ export class Star {
 
   update(dt) {
     this.age += dt;
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
     this.flicker += dt * 3.1;
     // Late-life expansion into a red giant: cooler, larger, brighter in red.
     const b = this.burn;
@@ -65,9 +64,6 @@ export class BlackHole {
     this.mass = mass;
     this.progenitorMass = progenitorMass;
     this.age = 0;
-    /** Acceleration from the universe's force solve, applied by the caller. */
-    this.ax = 0;
-    this.ay = 0;
     this.spin = rng.chance(0.5) ? 1 : -1;
     this.diskPhase = rng.angle();
     this.jetAngle = rng.angle();
@@ -100,15 +96,22 @@ export class BlackHole {
     return 4.5 + Math.pow(this.mass, 0.44) * 1.7;
   }
 
-  /** Radius inside which gas is dense enough for viscosity to matter. Outside
-   *  it the hole still pulls — through the tree, like everything else — but the
-   *  gas is on a clean ballistic orbit. */
+  /** Radius inside which matter is definitely captured. Capped as a fraction
+   *  of the host universe (set by the universe each frame) so that a very
+   *  massive hole cannot claim a third of the sky as its accretion zone. */
+  get captureRadius() {
+    return Math.min(this.horizon * 7, this.captureCap);
+  }
+
+  /** Radius inside which matter feels a strong, disc-forming pull. */
   get influenceRadius() {
-    return Math.min(this.horizon * 22, this.captureCap * 3);
+    return this.horizon * 26;
   }
 
   update(dt) {
     this.age += dt;
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
     this.diskPhase += dt * this.spin * 1.4;
     this.jetAngle += dt * this.spin * 0.09;
     this.rateSmoothed += (this.accretionRate - this.rateSmoothed) * Math.min(1, dt * 2.2);
@@ -143,8 +146,6 @@ export class BlackHole {
     this.x = (this.x * this.mass + other.x * other.mass) / total;
     this.y = (this.y * this.mass + other.y * other.mass) / total;
     this.mass = total;
-    this.ax = (this.ax * this.mass + other.ax * other.mass) / total;
-    this.ay = (this.ay * this.mass + other.ay * other.mass) / total;
     this.bank += other.bank;
     this.reservoir += other.reservoir;
     this.backflow += other.backflow;
