@@ -30,6 +30,12 @@ export class ParticlePool {
     this.age = new Float32Array(capacity);
     this.life = new Float32Array(capacity); // <= 0 means "never expires"
     this.size = new Float32Array(capacity);
+    // Cached gravitational acceleration. Forces are re-solved every few
+    // substeps and held constant in between — acceleration varies far more
+    // slowly than position, and a full tree walk per particle per substep is
+    // the single most expensive thing in the simulation.
+    this.ax = new Float32Array(capacity);
+    this.ay = new Float32Array(capacity);
     this.type = new Uint8Array(capacity);
     this.alive = new Uint8Array(capacity);
     // Object slot, used by ACCRETION particles to hold the black hole they are
@@ -71,6 +77,8 @@ export class ParticlePool {
     this.size[i] = size;
     this.age[i] = 0;
     this.life[i] = life;
+    this.ax[i] = 0;
+    this.ay[i] = 0;
     this.type[i] = type;
     this.alive[i] = 1;
     this.count++;

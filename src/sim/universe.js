@@ -14,6 +14,7 @@
 
 import { ParticlePool, PT } from '../engine/particles.js';
 import { SpatialHash } from '../engine/spatialhash.js';
+import { Quadtree } from '../engine/quadtree.js';
 import { Star, BlackHole } from './bodies.js';
 import { generationColor } from '../engine/color.js';
 
@@ -25,36 +26,74 @@ export const U_RADIUS = 1000;
 export const REFERENCE_MASS = 6200;
 
 const GRID_CELL = 40;
-const BODY_SOFT = 1100; // softening length², keeps close encounters finite
-const CELL_SOFT = 2200;
-/** Extra weight on grid-resolution self-gravity. Gas has to be able to gather
- *  into arms and knots on its own; the bare inverse-square term at this
- *  resolution is far too weak to produce visible structure. */
-const CLUMPING = 2.0;
-const GRAV_SCALE = 58;
-/** Vacuum energy pushes outward; the curvature of the closed space pulls back.
- *  Their difference is what decides whether a universe binds at all — a
- *  universe with Λ above ~0.6 blows itself apart before anything can collapse,
- *  which is exactly the selective pressure the theory needs it to have. */
-const LAMBDA_SCALE = 34;
-const CURVATURE = 32;
-const LONG_RANGE = 0.3;
-/** Radial bins used to build the rotation curve. */
-const PROFILE_BINS = 24;
+
+/**
+ * Gravity is a genuine N-body solve: every particle, star and black hole goes
+ * into one Barnes-Hut tree each step and is accelerated by all the others.
+ * There is no imposed central force and no boundary — a universe is held
+ * together by its own mass, the way a real self-gravitating system is, and
+ * anything that ends up unbound really does leave.
+ */
+const GRAV_SCALE = 2200;
+const SOFTENING2 = 1250; // softening length², keeps close encounters finite
+const THETA2 = 0.85 * 0.85; // Barnes-Hut opening angle, squared
+/** Substeps between full force solves. Acceleration changes slowly compared to
+ *  position, so re-solving every step buys accuracy nobody can see. */
+const FORCE_INTERVAL = 3;
+/** Speed ceiling, in units/s. Softened gravity cannot produce a true
+ *  singularity in the force law, but a close pass can still throw a particle
+ *  hard enough to spoil the integration. */
+const V_MAX = 520;
+
+/**
+ * Vacuum energy: a genuine repulsive acceleration proportional to distance,
+ * which is how a cosmological constant actually behaves. Nothing pulls back
+ * except the universe's own gravity, so a universe with too much Λ really does
+ * come apart before it can form structure — that is the selection pressure,
+ * not a tuned penalty.
+ */
+// Calibrated against the gravity of a typical universe: at the founding value
+// the repulsion is a sizeable but sub-dominant fraction of the inward pull, and
+// it overwhelms gravity somewhere past Λ ≈ 1.2. Because it grows with radius
+// while gravity falls off, it also sets a natural outer scale — matter inside
+// that radius stays bound, matter outside it accelerates away, which is what a
+// cosmological constant genuinely does.
+const LAMBDA_SCALE = 0.03;
+
+/** Bins used to find the half-mass radius. */
+const RADIAL_BINS = 40;
+
+/** Beyond this multiple of the matter radius a particle has left for good. */
+const ESCAPE_FACTOR = 2.2;
+
+/** Disc viscosity, per second, at the horizon. Gas rubbing against gas is what
+ *  lets an accretion disc shed angular momentum and drain; without it a disc
+ *  orbits forever and the hole starves. */
+const DISC_VISCOSITY = 2.4;
 
 const PARTICLE_MASS = 1.0;
 /** Mass a grid cell must hold before its gas is self-gravitating. Derived from
  *  the reference density so that a small universe and a large one form stars
  *  with the same statistics — only the number of cells differs. */
-const OVERDENSITY = 5.0;
+// Sized so that stars stay a small share of a universe's mass. Let stars carry
+// most of it and the system becomes a few dozen heavy point masses, which
+// relax, segregate and evaporate — real dynamics, but nothing like a galaxy,
+// because a real star is a negligible fraction of the mass around it.
+const OVERDENSITY = 3.2;
 const IGNITION_BASE = (REFERENCE_MASS / (Math.PI * U_RADIUS * U_RADIUS)) * GRID_CELL * GRID_CELL * OVERDENSITY;
 const COLD_ENOUGH = 1400; // K — warmer gas is pressure-supported
-const PHOTON_MASS = 0.02;
+// Small enough that a star sheds only a modest fraction of itself over its
+// life. At the previous value a star radiated away everything it had before it
+// could reach the collapse limit, so nothing ever became a singularity.
+const PHOTON_MASS = 0.0015;
 /** A star collapses to a singularity when its mass exceeds the collapse-limit
  *  gene times this multiple of the universe's own ignition mass. Expressing it
  *  relative to the local cloud scale — rather than in absolute units — is what
  *  makes the gene mean the same thing in a small universe and a large one. */
-const SN_FACTOR = 1.85;
+const SN_FACTOR = 0.7;
+
+/** Ceiling on the share of a universe's mass that may sit in stars at once. */
+const STELLAR_FRACTION = 0.22;
 
 /** How long a universe may go without producing a singularity before it is
  *  considered spent, in its own elapsed seconds. */
@@ -99,15 +138,41 @@ export class Universe {
     this.spin = rng.chance(0.5) ? 1 : -1;
 
     this.pool = new ParticlePool(capacity);
-    this.hash = new SpatialHash(U_RADIUS * 1.05, GRID_CELL, capacity);
+    this.hash = new SpatialHash(U_RADIUS * 1.6, GRID_CELL, capacity);
+    /** One tree per universe, sized for every particle plus every body. */
+    this.tree = new Quadtree(capacity + 128);
+    this._treeSlot = new Int32Array(capacity);
+    this._starSlots = [];
+    this._holeSlots = [];
+    this._forceTick = 0;
+    this._treeBuilt = false;
+    this._radialBins = new Float32Array(RADIAL_BINS);
     this.stars = [];
     this.blackHoles = [];
 
     /** Mass held in the vacuum, waiting to condense into particles. */
     this.reservoir = dowry;
+    /** The dowry, remembered: the inflating disc needs to know its own total
+     *  before any of it has been laid down. */
+    this.birthMass = dowry;
     /** Scale factor. A universe expands as its parent feeds it and contracts as
      *  it hands mass back — cosmic expansion driven by the umbilical. */
     this.radius = scaleFor(dowry);
+    /** Radius containing half the matter. Set here rather than alongside the
+     *  other scratch state because it is derived from `radius`, which is
+     *  assigned below it. */
+    this.halfMassRadius = this.radius * 0.42;
+    /**
+     * Scale of the disc laid down at the bounce. Fixed at birth — deriving it
+     * from the measured radius while the disc is still being created feeds the
+     * measurement back into the velocities it is measuring — and set well
+     * inside the radius where the vacuum takes over, so that the breathing of
+     * a starburst cycle cannot carry the whole disc out past the point of no
+     * return.
+     */
+    this.discRadius = this.boundRadius * 0.3;
+    this.radius = this.discRadius * 1.7;
+    this.halfMassRadius = this.discRadius * 0.6;
     this.age = 0;
     this.phase = PHASE.INFLATION;
     this.inflationT = 0;
@@ -119,6 +184,8 @@ export class Universe {
     this.supernovae = 0;
     this.massReceived = dowry;
     this.massReturned = 0;
+    /** Mass that left the system entirely and went back to the vacuum budget. */
+    this.massEscaped = 0;
     this.peakStars = 0;
     /** Summed birth mass of every star ever formed here, for diagnostics. */
     this.starMassTotal = 0;
@@ -139,9 +206,9 @@ export class Universe {
     this._genesisAcc = 0;
     this._cells = [];
     this._items = [];
+    this._items2 = new Int32Array(capacity);
     this._dissolveT = 0;
     this._scaleAcc = 0;
-    this._profile = new Float32Array(PROFILE_BINS);
     this.lod = 1; // 1 = fully simulated, <1 = reduced spawn budget
   }
 
@@ -172,31 +239,11 @@ export class Universe {
 
   /** Inward acceleration per unit radius: curvature minus vacuum energy.
    *  Negative means the universe is unbound and will simply disperse. */
-  get binding() {
-    return (CURVATURE - this.genome.lambda * LAMBDA_SCALE) / this.radius;
-  }
-
-  /**
-   * Circular speed at radius r: the cosmological (harmonic) term plus the pull
-   * of everything enclosed within r. Matter injected at this speed goes into
-   * orbit rather than falling in, which is what turns a universe into a disc
-   * instead of a point.
-   */
-  circularSpeed(r) {
-    const k = this.binding;
-    const harmonic = k > 0 ? k * r * r : 0;
-    const menc = this.enclosedMass(r);
-    const kepler = (this.genome.G * GRAV_SCALE * LONG_RANGE * menc) / Math.max(60, r);
-    return Math.sqrt(harmonic + kepler);
-  }
-
-  /** Mass inside radius r, from the profile rebuilt each frame. */
-  enclosedMass(r) {
-    const prof = this._profile;
-    if (!prof) return 0;
-    const f = (r / this.radius) * PROFILE_BINS;
-    const i = f <= 0 ? 0 : f >= PROFILE_BINS - 1 ? PROFILE_BINS - 1 : f | 0;
-    return prof[i];
+  /** Radius containing essentially all of the matter. Measured, not imposed:
+   *  there is no wall here, so this is simply where the universe currently is.
+   *  Used for framing, for placing offspring, and for the escape test. */
+  get matterRadius() {
+    return this.radius;
   }
 
   /** Everything this universe owns, including mass in transit and in bodies. */
@@ -233,34 +280,58 @@ export class Universe {
       return;
     }
 
-    this._updateScale(dt);
     this._buildHash();
+    this._gravity(dt);
     this._integrate(dt);
     this._formStars(dt);
     this._updateStars(dt);
-    this._gravitateBodies(dt);
     this._updateBlackHoles(dt, ctx);
     this._genesis(dt);
+    if (this.phase !== PHASE.INFLATION) this._measureExtent(dt);
     this._classify();
   }
 
-  /** The bounce: reservoir mass erupts outward as an inflaton shell. */
+  /**
+   * The bounce: banked mass condenses into a rotating disc.
+   *
+   * The velocity field matters more than it looks. Matter laid down cold — or
+   * with a speed derived from the mass already present, which is zero before
+   * the first particle exists — undergoes a cold collapse, and a cold collapse
+   * violently ejects a large fraction of itself and never recovers. So the
+   * disc is laid down already rotating, on the solid-body curve that a uniform
+   * disc of this mass actually has, and it is stable from the first frame.
+   */
   _inflate(dt) {
     this.inflationT += dt;
     const pool = this.pool;
     const budget = Math.min(this.reservoir, dt * (this.reservoir + 400) * 1.4);
+
+    // Enclosed mass of a uniform disc grows as r², so the circular speed grows
+    // linearly with radius: v(r) = r · sqrt(G M / R³).
+    const R0 = this.discRadius;
+    const M = Math.max(1, this.birthMass);
+    const omega = Math.sqrt((this.genome.G * GRAV_SCALE * M) / (R0 * R0 * R0));
+    const vEdge = omega * R0;
+
+    // Rotation alone is not enough. A self-gravitating disc with no random
+    // motion is violently unstable: it fragments, the fragments scatter each
+    // other, and the disc heats until half of it is unbound. Real discs are
+    // held up by velocity dispersion as well as rotation, so this one starts
+    // with both, near virial equilibrium.
+    const sigma = vEdge * 0.28;
+
     let spent = 0;
     while (spent + PARTICLE_MASS <= budget) {
       const a = this.rng.angle();
-      const speed = this.rng.range(230, 430) * (1 + this.genome.lambda * 0.35);
-      const r = this.rng.range(0, 26);
-      const swirl = speed * 0.55 * this.spin;
+      const r = Math.sqrt(this.rng.float()) * R0;
+      const vt = omega * r * this.spin * 0.88;
+      const disp = sigma;
       const i = pool.spawn(
         PT.INFLATON,
         Math.cos(a) * r,
         Math.sin(a) * r,
-        Math.cos(a) * speed - Math.sin(a) * swirl,
-        Math.sin(a) * speed + Math.cos(a) * swirl,
+        -Math.sin(a) * vt + this.rng.gauss(0, disp),
+        Math.cos(a) * vt + this.rng.gauss(0, disp),
         PARTICLE_MASS,
         this.rng.range(9000, 26000),
         this.rng.range(1.6, 3.2),
@@ -276,78 +347,143 @@ export class Universe {
     }
   }
 
-  /** Track the scale factor toward the size implied by the mass on hand. */
-  _updateScale(dt) {
-    this._scaleAcc += dt;
-    if (this._scaleAcc < 0.5) return;
-    this._scaleAcc = 0;
-    const target = scaleFor(this.totalMass());
-    this.radius += (target - this.radius) * 0.22;
+  /**
+   * Circular speed at radius r for the mass currently inside it. Used only to
+   * choose sensible velocities for matter *entering* the universe — once a
+   * particle exists, its trajectory comes from the force solve and nothing
+   * else.
+   */
+  circularScale(r) {
+    const m = this.massWithin(r);
+    if (m <= 0) return 0;
+    return Math.sqrt((this.genome.G * GRAV_SCALE * m) / Math.max(40, r));
+  }
+
+  /**
+   * Radius where the vacuum's outward push balances the universe's own inward
+   * pull. Inside it matter is bound; outside it accelerates away. A stable,
+   * physically meaningful scale — unlike the half-mass radius, which swings
+   * with every starburst — so it is what new matter is injected against.
+   */
+  get boundRadius() {
+    const lam = this.genome.lambda * LAMBDA_SCALE;
+    const gm = this.genome.G * GRAV_SCALE * Math.max(1, this.totalMass());
+    if (!(lam > 1e-9)) return U_RADIUS;
+    return Math.cbrt(gm / lam);
+  }
+
+  massWithin(r) {
+    const p = this.pool;
+    const r2 = r * r;
+    let m = 0;
+    for (let i = 0; i <= p.high; i++) {
+      if (!p.alive[i]) continue;
+      const t = p.type[i];
+      if (t === PT.FLUX) continue;
+      if (p.x[i] * p.x[i] + p.y[i] * p.y[i] <= r2) m += p.mass[i];
+    }
+    for (const s of this.stars) if (s.x * s.x + s.y * s.y <= r2) m += s.mass;
+    for (const b of this.blackHoles) if (b.x * b.x + b.y * b.y <= r2) m += b.mass;
+    return m;
   }
 
   _buildHash() {
     const p = this.pool;
     const h = this.hash;
+    h.extent = Math.max(200, this.radius * 1.4);
     h.clear();
-    const prof = this._profile;
-    prof.fill(0);
-    const scale = PROFILE_BINS / this.radius;
+    for (let i = 0; i <= p.high; i++) {
+      if (!p.alive[i]) continue;
+      const t = p.type[i];
+      if (t !== PT.GAS && t !== PT.DUST) continue;
+      h.insert(i, p.x[i], p.y[i], p.mass[i]);
+    }
+  }
+
+  // ----------------------------------------------------------------- gravity
+
+  /**
+   * One Barnes-Hut solve over every gravitating thing in the universe. Gas,
+   * dust, infalling matter, stars and black holes all sit in the same tree and
+   * all feel each other; nothing is on a rail.
+   */
+  _gravity(dt) {
+    this._forceTick = (this._forceTick + 1) % FORCE_INTERVAL;
+    if (this._forceTick !== 0 && this._treeBuilt) return;
+
+    const p = this.pool;
+    const tree = this.tree;
+    const G = this.genome.G * GRAV_SCALE;
+    const lambda = this.genome.lambda * LAMBDA_SCALE;
+
+    tree.reset();
+    const slot = this._treeSlot;
+    for (let i = 0; i <= p.high; i++) {
+      slot[i] = -1;
+      if (!p.alive[i]) continue;
+      const t = p.type[i];
+      // Light and umbilical throughput carry mass but are not sources: photons
+      // are massless in every sense that matters here, and flux is inside a
+      // wormhole rather than in this universe's space.
+      if (t === PT.PHOTON || t === PT.FLUX) continue;
+      slot[i] = tree.add(p.x[i], p.y[i], p.mass[i]);
+    }
+    const starSlot = this._starSlots;
+    starSlot.length = 0;
+    for (const s of this.stars) starSlot.push(tree.add(s.x, s.y, s.mass));
+    const holeSlot = this._holeSlots;
+    holeSlot.length = 0;
+    for (const b of this.blackHoles) holeSlot.push(tree.add(b.x, b.y, b.mass));
+
+    tree.build();
+    this._treeBuilt = true;
 
     for (let i = 0; i <= p.high; i++) {
       if (!p.alive[i]) continue;
       const t = p.type[i];
-      if (t === PT.FLUX) continue;
       const x = p.x[i];
       const y = p.y[i];
-      if (t === PT.GAS || t === PT.DUST) h.insert(i, x, y, p.mass[i]);
-      const b = Math.min(PROFILE_BINS - 1, (Math.sqrt(x * x + y * y) * scale) | 0);
-      prof[b] += p.mass[i];
+      if (t === PT.FLUX) continue;
+
+      if (t === PT.PHOTON) {
+        // Light is deflected but does not fall: only the strongest local
+        // gradient bends it, and it never picks up speed.
+        tree.accel(x, y, G * 0.35, SOFTENING2 * 4, THETA2, -1);
+        p.ax[i] = tree.ax;
+        p.ay[i] = tree.ay;
+        continue;
+      }
+
+      tree.accel(x, y, G, SOFTENING2, THETA2, slot[i]);
+      p.ax[i] = tree.ax + x * lambda;
+      p.ay[i] = tree.ay + y * lambda;
     }
-    for (const s of this.stars) {
-      const b = Math.min(PROFILE_BINS - 1, (Math.hypot(s.x, s.y) * scale) | 0);
-      prof[b] += s.mass;
+
+    // Stars and black holes are solved from the same tree, so a star really is
+    // pulled by the gas it formed from and by every other body.
+    for (let k = 0; k < this.stars.length; k++) {
+      const s = this.stars[k];
+      tree.accel(s.x, s.y, G, SOFTENING2, THETA2, starSlot[k]);
+      s.ax = tree.ax + s.x * lambda;
+      s.ay = tree.ay + s.y * lambda;
     }
-    for (const bh of this.blackHoles) {
-      const b = Math.min(PROFILE_BINS - 1, (Math.hypot(bh.x, bh.y) * scale) | 0);
-      prof[b] += bh.mass;
+    for (let k = 0; k < this.blackHoles.length; k++) {
+      const b = this.blackHoles[k];
+      tree.accel(b.x, b.y, G, SOFTENING2, THETA2, holeSlot[k]);
+      b.ax = tree.ax + b.x * lambda;
+      b.ay = tree.ay + b.y * lambda;
     }
-    for (let i = 1; i < PROFILE_BINS; i++) prof[i] += prof[i - 1];
+    void dt;
   }
 
   // --------------------------------------------------------------- integration
 
   _integrate(dt) {
     const p = this.pool;
-    const h = this.hash;
-    const g = this.genome;
-    const G = g.G * GRAV_SCALE;
-    const lam = g.lambda * LAMBDA_SCALE - CURVATURE;
-    const cool = g.cooling;
-    const stars = this.stars;
+    const cool = this.genome.cooling;
     const holes = this.blackHoles;
-    const dim = h.dim;
-    const cell = h.cell;
-    const extent = h.extent;
-    const R = this.radius;
-
-    // Long-range term: everything feels the universe's own centre of mass.
-    let gmx = 0;
-    let gmy = 0;
-    let gm = 0;
-    for (let c = 0; c < h.cellMass.length; c++) {
-      const m = h.cellMass[c];
-      if (m === 0) continue;
-      gm += m;
-      gmx += h.cellMx[c];
-      gmy += h.cellMy[c];
-    }
-    if (gm > 0) {
-      gmx /= gm;
-      gmy /= gm;
-    }
-    this._gm = gm;
-    this._gmx = gmx;
-    this._gmy = gmy;
+    const escape = this.boundRadius * ESCAPE_FACTOR;
+    const escape2 = escape * escape;
 
     for (let i = 0; i <= p.high; i++) {
       if (!p.alive[i]) continue;
@@ -363,8 +499,6 @@ export class Universe {
       let y = p.y[i];
       let vx = p.vx[i];
       let vy = p.vy[i];
-      let ax = 0;
-      let ay = 0;
 
       if (t === PT.FLUX) {
         // Umbilical throughput: steered, not gravitating. It is threading a
@@ -375,10 +509,8 @@ export class Universe {
           p.kill(i);
           continue;
         }
-        const tx = child.anchorX;
-        const ty = child.anchorY;
-        const dx = tx - x;
-        const dy = ty - y;
+        const dx = child.anchorX - x;
+        const dy = child.anchorY - y;
         const d = Math.hypot(dx, dy);
         if (d < 16) {
           child.feed(p.mass[i]);
@@ -396,149 +528,99 @@ export class Universe {
         continue;
       }
 
-      if (t === PT.ACCRETION) {
-        this._spiral(i, dt);
-        continue;
-      }
+      vx += p.ax[i] * dt;
+      vy += p.ay[i] * dt;
 
-      const gravitates = t === PT.GAS || t === PT.DUST;
-      const lensed = t === PT.PHOTON;
-
-      // --- bodies -----------------------------------------------------------
-      let nearBH = null;
-      let nearD2 = Infinity;
-      if (gravitates || lensed) {
-        for (let b = 0; b < holes.length; b++) {
-          const o = holes[b];
-          const dx = o.x - x;
-          const dy = o.y - y;
-          const d2 = dx * dx + dy * dy;
-          if (d2 < nearD2) {
-            nearD2 = d2;
-            nearBH = o;
-          }
-          const s = d2 + BODY_SOFT;
-          const f = ((G * o.mass) / s) * (lensed ? 0.5 : 1);
-          const inv = 1 / Math.sqrt(s);
-          ax += dx * inv * f;
-          ay += dy * inv * f;
-        }
-        if (gravitates) {
-          for (let b = 0; b < stars.length; b++) {
-            const o = stars[b];
-            const dx = o.x - x;
-            const dy = o.y - y;
-            const s = dx * dx + dy * dy + BODY_SOFT;
-            const f = (G * o.mass) / s;
-            const inv = 1 / Math.sqrt(s);
-            ax += dx * inv * f;
-            ay += dy * inv * f;
-          }
-        }
-      }
-
-      // --- self-gravity of the gas, at grid resolution ----------------------
-      if (gravitates) {
-        const gx = ((x + extent) / cell) | 0;
-        const gy = ((y + extent) / cell) | 0;
-        for (let oy = -1; oy <= 1; oy++) {
-          const ry = gy + oy;
-          if (ry < 0 || ry >= dim) continue;
-          for (let ox = -1; ox <= 1; ox++) {
-            const rx = gx + ox;
-            if (rx < 0 || rx >= dim) continue;
-            const c = ry * dim + rx;
-            const m = h.cellMass[c];
-            if (m <= 0) continue;
-            const dx = h.cellMx[c] / m - x;
-            const dy = h.cellMy[c] / m - y;
-            const s = dx * dx + dy * dy + CELL_SOFT;
-            const f = (G * m * CLUMPING) / s;
-            const inv = 1 / Math.sqrt(s);
-            ax += dx * inv * f;
-            ay += dy * inv * f;
-          }
-        }
-        if (gm > 0) {
-          const dx = gmx - x;
-          const dy = gmy - y;
-          const s = dx * dx + dy * dy + 40000;
-          const f = (G * gm * LONG_RANGE) / s;
-          const inv = 1 / Math.sqrt(s);
-          ax += dx * inv * f;
-          ay += dy * inv * f;
-        }
-        // Net of vacuum energy and curvature, proportional to distance.
-        ax += (x / R) * lam;
-        ay += (y / R) * lam;
-      }
-
-      // --- species behaviour ------------------------------------------------
       let temp = p.temp[i];
       if (t === PT.GAS || t === PT.DUST) {
-        // Radiative cooling, then drag once the gas is cold and dense.
         temp -= temp * cool * 0.42 * dt;
         if (temp < 55) temp = 55;
-        const drag = t === PT.DUST ? 0.02 : 0.006;
-        const k = Math.min(0.9, drag * dt * (1 - Math.min(1, temp / 5200)));
-        vx -= vx * k;
-        vy -= vy * k;
       } else if (t === PT.JET) {
         temp -= temp * 0.5 * dt;
       } else if (t === PT.INFLATON) {
         temp -= temp * 1.25 * dt;
       } else if (t === PT.PHOTON) {
-        // Photons move at a fixed speed; gravity only bends them.
+        // Photons travel at a fixed speed; gravity only changes their heading.
         const sp = Math.hypot(vx, vy) || 1;
-        vx = (vx / sp) * 620;
-        vy = (vy / sp) * 620;
+        vx = (vx / sp) * 300;
+        vy = (vy / sp) * 300;
       }
+
+      // --- black holes: capture, and the viscosity that lets a disc drain ---
+      let captured = false;
+      for (let b = 0; b < holes.length; b++) {
+        const o = holes[b];
+        const dx = x - o.x;
+        const dy = y - o.y;
+        const d2 = dx * dx + dy * dy;
+        const h = o.horizon;
+        if (d2 < h * h) {
+          o.swallow(p.mass[i]);
+          p.kill(i);
+          captured = true;
+          break;
+        }
+        if (t !== PT.GAS && t !== PT.DUST && t !== PT.ACCRETION) continue;
+        const reach = o.influenceRadius;
+        if (d2 > reach * reach) continue;
+
+        // Inside the disc, gas rubs against gas. Real viscosity transports
+        // angular momentum outward and lets the rest sink; here that is a drag
+        // on motion relative to the hole, strongest where the disc is densest.
+        // The orbit itself is never scripted — it comes out of the force solve.
+        const d = Math.sqrt(d2) || 1;
+        const rel = d / h;
+        const visc = DISC_VISCOSITY / (1 + rel * rel * 0.06);
+        const rvx = vx - o.vx;
+        const rvy = vy - o.vy;
+        const k = Math.min(0.5, visc * dt);
+        vx -= rvx * k;
+        vy -= rvy * k;
+        if (t !== PT.ACCRETION) p.retype(i, PT.ACCRETION);
+        p.ref[i] = o;
+        temp += (1400 + 26000 * Math.pow(h / d, 1.3) - temp) * Math.min(1, dt * 1.6);
+      }
+      if (captured) continue;
+
+      // Matter that drifted out of every hole's reach is ordinary gas again.
+      if (t === PT.ACCRETION && p.ref[i]) {
+        const o = p.ref[i];
+        const dx = x - o.x;
+        const dy = y - o.y;
+        const reach = o.influenceRadius;
+        if (o.dead || dx * dx + dy * dy > reach * reach) {
+          p.retype(i, PT.GAS);
+          p.ref[i] = null;
+        }
+      }
+
       p.temp[i] = temp;
 
-      vx += ax * dt;
-      vy += ay * dt;
+      const sp2 = vx * vx + vy * vy;
+      if (!(sp2 >= 0)) {
+        // Non-finite: drop the particle back into the vacuum budget rather than
+        // letting a NaN spread through the tree into every other trajectory.
+        this.reservoir += p.mass[i];
+        p.kill(i);
+        continue;
+      }
+      if (sp2 > V_MAX * V_MAX) {
+        const s = V_MAX / Math.sqrt(sp2);
+        vx *= s;
+        vy *= s;
+      }
+
       x += vx * dt;
       y += vy * dt;
 
-      // --- capture by a black hole -----------------------------------------
-      if (nearBH && (gravitates || t === PT.PHOTON)) {
-        const d = Math.sqrt(nearD2);
-        if (d < nearBH.horizon * 1.15) {
-          nearBH.swallow(p.mass[i]);
-          p.kill(i);
-          continue;
-        }
-        if ((t === PT.GAS || t === PT.DUST) && d < nearBH.captureRadius) {
-          p.retype(i, PT.ACCRETION);
-          p.ref[i] = nearBH;
-          // Remember where on the disc it entered, so the spiral is continuous.
-          p.discA[i] = Math.atan2(y - nearBH.y, x - nearBH.x);
-          p.discR[i] = d;
-          p.life[i] = 0;
-        }
-      }
-
-      // --- closed spatial boundary -----------------------------------------
-      const r2 = x * x + y * y;
-      if (r2 > R * R) {
-        const r = Math.sqrt(r2);
-        const nx = x / r;
-        const ny = y / r;
-        if (t === PT.PHOTON) {
-          // Absorbed at the horizon of the closed space and returned to the
-          // vacuum budget — the step that keeps starlight inside the ledger.
-          this.reservoir += p.mass[i];
-          p.kill(i);
-          continue;
-        } else {
-          const dot = vx * nx + vy * ny;
-          if (dot > 0) {
-            vx -= 1.7 * dot * nx;
-            vy -= 1.7 * dot * ny;
-          }
-        }
-        x = nx * R;
-        y = ny * R;
+      // No wall. A particle thrown clear of the universe's gravity simply
+      // leaves, and its mass returns to the vacuum budget so the ledger still
+      // balances and the matter can condense again later.
+      if (x * x + y * y > escape2) {
+        this.reservoir += p.mass[i];
+        this.massEscaped += p.mass[i];
+        p.kill(i);
+        continue;
       }
 
       p.x[i] = x;
@@ -546,55 +628,94 @@ export class Universe {
       p.vx[i] = vx;
       p.vy[i] = vy;
     }
+
+    this._moveBodies(dt, escape2);
   }
 
-  /**
-   * Accretion is integrated kinematically rather than by force balance: the
-   * particle's radius and phase around its hole are advanced directly, so the
-   * disc is guaranteed to drain instead of settling into an orbit that a
-   * softened inverse-square law can hold indefinitely.
-   */
-  _spiral(i, dt) {
+  /** Stars and holes integrate from the same force solve as everything else. */
+  _moveBodies(dt, escape2) {
+    for (const s of this.stars) {
+      s.vx += s.ax * dt;
+      s.vy += s.ay * dt;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+    }
+    for (const b of this.blackHoles) {
+      b.vx += b.ax * dt;
+      b.vy += b.ay * dt;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+    }
+    // A star flung clear of the system takes its mass with it; a black hole is
+    // heavy enough that letting it wander off would drain the universe, so it
+    // is treated as still bound and turned around at the escape radius.
+    for (let i = this.stars.length - 1; i >= 0; i--) {
+      const s = this.stars[i];
+      if (s.x * s.x + s.y * s.y > escape2) {
+        this.reservoir += s.mass;
+        this.massEscaped += s.mass;
+        this.stars.splice(i, 1);
+      }
+    }
+    for (const b of this.blackHoles) {
+      const r2 = b.x * b.x + b.y * b.y;
+      if (r2 > escape2) {
+        const r = Math.sqrt(r2);
+        b.vx -= (b.vx * b.x + b.vy * b.y) / r2 * b.x * 1.8;
+        b.vy -= (b.vx * b.x + b.vy * b.y) / r2 * b.y * 1.8;
+        void r;
+      }
+    }
+  }
+
+  /** Track where the matter actually is, so framing follows the universe
+   *  rather than the universe being forced to fit the frame. */
+  _measureExtent(dt) {
+    this._scaleAcc += dt;
+    if (this._scaleAcc < 0.4) return;
+    this._scaleAcc = 0;
+
     const p = this.pool;
-    const bh = p.ref[i];
-    if (!bh || bh.dead) {
-      // Its hole merged away or evaporated; hand the matter back to the medium.
-      p.retype(i, PT.GAS);
-      p.ref[i] = null;
-      p.life[i] = 0;
-      p.age[i] = 0;
-      p.temp[i] = 4000;
-      return;
+    const bins = this._radialBins;
+    bins.fill(0);
+    const span = this.radius * 2.5;
+    const scale = RADIAL_BINS / span;
+    let m = 0;
+
+    const put = (x, y, mass) => {
+      const r = Math.sqrt(x * x + y * y);
+      const b = Math.min(RADIAL_BINS - 1, (r * scale) | 0);
+      bins[b] += mass;
+      m += mass;
+    };
+    for (let i = 0; i <= p.high; i++) {
+      if (!p.alive[i] || p.type[i] === PT.FLUX) continue;
+      put(p.x[i], p.y[i], p.mass[i]);
     }
+    for (const s of this.stars) put(s.x, s.y, s.mass);
+    for (const b of this.blackHoles) put(b.x, b.y, b.mass);
+    if (m <= 0) return;
 
-    const h = bh.horizon;
-    let r = p.discR[i];
-    let a = p.discA[i];
-
-    if (r <= h * 1.1) {
-      bh.swallow(p.mass[i]);
-      p.kill(i);
-      return;
+    // Half-mass radius. A root-mean-square radius is dominated by the few
+    // particles on their way out of the system and pulls the frame open;
+    // the half-mass radius tracks where the universe actually is.
+    let acc = 0;
+    let half = RADIAL_BINS - 1;
+    for (let b = 0; b < RADIAL_BINS; b++) {
+      acc += bins[b];
+      if (acc >= m * 0.5) {
+        half = b;
+        break;
+      }
     }
-
-    // Exponential inspiral, floored so the last stretch is not infinitely slow.
-    r -= Math.max(r / 3.4, h * 0.35) * dt;
-    const vOrb = 40 + 250 * Math.sqrt(h / Math.max(h, r));
-    a += (bh.spin * vOrb * dt) / Math.max(h, r);
-
-    const nx = bh.x + Math.cos(a) * r;
-    const ny = bh.y + Math.sin(a) * r;
-    p.vx[i] = (nx - p.x[i]) / dt;
-    p.vy[i] = (ny - p.y[i]) / dt;
-    p.x[i] = nx;
-    p.y[i] = ny;
-    p.discR[i] = r;
-    p.discA[i] = a;
-    // Viscous heating rises steeply toward the horizon.
-    p.temp[i] = 1400 + 27000 * Math.pow(h / Math.max(h, r), 1.4);
+    const rHalf = ((half + 0.5) / RADIAL_BINS) * span;
+    this.halfMassRadius = rHalf;
+    if (!Number.isFinite(rHalf) || rHalf <= 0) return;
+    const cap = Math.min(U_RADIUS * 1.5, this.boundRadius * 1.5);
+    const target = Math.max(120, Math.min(cap, rHalf * 2.4));
+    this.radius += (target - this.radius) * 0.25;
   }
 
-  /** Handle end-of-life for a particle: recycle its species, or bank its mass. */
   _expire(i, t) {
     const p = this.pool;
     if (t === PT.PHOTON) {
@@ -622,116 +743,56 @@ export class Universe {
   // ------------------------------------------------------------ star formation
 
   _formStars(dt) {
-    if (this.stars.length > 30) return;
+    if (this.stars.length > 70) return;
     this._formAcc += dt;
     if (this._formAcc < 0.22) return;
     this._formAcc = 0;
 
+    // Star-formation efficiency. Left alone, a self-gravitating gas disc turns
+    // most of itself into stars within seconds, and a universe whose mass is
+    // mostly point-like stars relaxes and evaporates. Real star formation is
+    // inefficient — a few percent of a cloud per free-fall time — and this is
+    // the same limit: gas stays the dominant component.
+    let stellar = 0;
+    for (const s of this.stars) stellar += s.mass;
+    if (stellar > this.totalMass() * STELLAR_FRACTION) return;
+
     const need = this.ignitionMass;
-    const cells = this.hash.denseCells(need, 5, this._cells);
+    const maxMass = need * 3.4;
+    const cells = this.hash.denseCells(need, 2, this._cells);
     const p = this.pool;
 
     for (const c of cells) {
-      // Draw the whole neighbourhood into the collapse, not just the trigger
-      // cell — a cloud is bigger than one grid square, and the spread of masses
-      // this produces is what decides how many stars end as singularities.
-      const items = this._neighbourhood(c);
+      const items = this.hash.cellItems(c, this._items);
+      // Coldest gas collapses first, and only as much as one star can take.
+      items.sort((a, b) => p.temp[a] - p.temp[b]);
+
       let mass = 0;
       let mx = 0;
       let my = 0;
       let px = 0;
       let py = 0;
-      let cold = 0;
+      let taken = 0;
       for (const i of items) {
-        if (!p.alive[i]) continue;
-        if (p.temp[i] > COLD_ENOUGH) continue;
-        cold++;
+        if (!p.alive[i] || p.temp[i] > COLD_ENOUGH) continue;
+        if (mass >= maxMass) break;
         const m = p.mass[i];
         mass += m;
         mx += p.x[i] * m;
         my += p.y[i] * m;
         px += p.vx[i] * m;
         py += p.vy[i] * m;
+        this._items2[taken++] = i;
       }
-      if (mass < need || cold < 4) continue;
+      if (mass < need || taken < 4) continue;
 
-      for (const i of items) {
-        if (p.alive[i] && p.temp[i] <= COLD_ENOUGH) p.kill(i);
-      }
+      for (let k = 0; k < taken; k++) p.kill(this._items2[k]);
 
       const star = new Star(mx / mass, my / mass, px / mass, py / mass, mass, this.rng);
       this.stars.push(star);
       this.starsFormed++;
       this.starMassTotal += mass;
       if (this.stars.length > this.peakStars) this.peakStars = this.stars.length;
-    }
-  }
-
-  /**
-   * Bodies attract each other and sink through the gas. Without this, black
-   * holes drift ballistically forever, a universe silts up with dozens of small
-   * holes, and none of them ever accumulates enough to reproduce. With it,
-   * mass concentrates — which is precisely the behaviour the whole argument
-   * turns on.
-   */
-  _gravitateBodies(dt) {
-    const G = this.genome.G * GRAV_SCALE * 2.2;
-    const bodies = this._bodies || (this._bodies = []);
-    bodies.length = 0;
-    for (const s of this.stars) bodies.push(s);
-    for (const b of this.blackHoles) bodies.push(b);
-    const n = bodies.length;
-
-    for (let i = 0; i < n; i++) {
-      const a = bodies[i];
-      for (let j = i + 1; j < n; j++) {
-        const b = bodies[j];
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const s2 = dx * dx + dy * dy + BODY_SOFT * 4;
-        const inv = 1 / Math.sqrt(s2);
-        const f = (G / s2) * inv * dt;
-        a.vx += dx * f * b.mass;
-        a.vy += dy * f * b.mass;
-        b.vx -= dx * f * a.mass;
-        b.vy -= dy * f * a.mass;
-      }
-
-      // Pull toward the gas, plus dynamical friction against it. Together these
-      // are what let heavy objects settle into the centre instead of orbiting
-      // forever at the radius where they were born.
-      if (this._gm > 0) {
-        const dx = this._gmx - a.x;
-        const dy = this._gmy - a.y;
-        const s2 = dx * dx + dy * dy + 30000;
-        const inv = 1 / Math.sqrt(s2);
-        const f = ((G * this._gm * 0.6) / s2) * inv * dt;
-        a.vx += dx * f;
-        a.vy += dy * f;
-      }
-      const lam = this.genome.lambda * LAMBDA_SCALE - CURVATURE;
-      a.vx += (a.x / this.radius) * lam * dt;
-      a.vy += (a.y / this.radius) * lam * dt;
-
-      const drag = Math.min(0.5, 0.004 * dt);
-      a.vx -= a.vx * drag;
-      a.vy -= a.vy * drag;
-
-      // Bodies stay inside the closed space.
-      const r2 = a.x * a.x + a.y * a.y;
-      const lim = this.radius * 0.97;
-      if (r2 > lim * lim) {
-        const r = Math.sqrt(r2);
-        const nx = a.x / r;
-        const ny = a.y / r;
-        a.x = nx * lim;
-        a.y = ny * lim;
-        const dot = a.vx * nx + a.vy * ny;
-        if (dot > 0) {
-          a.vx -= 1.6 * dot * nx;
-          a.vy -= 1.6 * dot * ny;
-        }
-      }
     }
   }
 
@@ -775,8 +836,8 @@ export class Universe {
           PT.PHOTON,
           star.x + Math.cos(a) * star.radius,
           star.y + Math.sin(a) * star.radius,
-          Math.cos(a) * 620,
-          Math.sin(a) * 620,
+          Math.cos(a) * 300,
+          Math.sin(a) * 300,
           PHOTON_MASS,
           star.temp,
           1.1,
@@ -806,12 +867,12 @@ export class Universe {
     this.blackHolesFormed++;
     this.supernovae++;
     this.lastCollapse = this.age;
-    this._emitShell(star, star.mass - core, 120, 320, 24000);
+    this._emitShell(star, star.mass - core, 30, 95, 24000);
   }
 
   /** A low-mass star simply returns its envelope to the medium. */
   _nebula(star) {
-    this._emitShell(star, star.mass, 30, 90, 6500);
+    this._emitShell(star, star.mass, 8, 30, 6500);
   }
 
   _emitShell(star, mass, vMin, vMax, temp) {
@@ -1009,7 +1070,7 @@ export class Universe {
       left -= m;
       const pole = this.rng.chance(0.5) ? 0 : Math.PI;
       const a = bh.jetAngle + pole + this.rng.gauss(0, 0.09);
-      const sp = this.rng.range(420, 760);
+      const sp = this.rng.range(60, 150);
       const i = this.pool.spawn(
         PT.JET,
         bh.x + Math.cos(a) * bh.horizon * 1.4,
@@ -1038,22 +1099,35 @@ export class Universe {
     if (this._genesisAcc < 0.05) return;
     this._genesisAcc = 0;
 
-    const rate = Math.min(this.reservoir, 26 + this.reservoir * 0.12);
+    const rate = Math.min(this.reservoir, 0.9 + this.reservoir * 0.02);
     let left = Math.floor(rate / PARTICLE_MASS) * PARTICLE_MASS;
+
+    // Matter enters through the mouth of the umbilical that feeds this
+    // universe, as a stream falling into the potential — not as a uniform
+    // shower on a rim, which was what produced the ring of orbits.
+    const mouth = this._mouthAngle();
+    // Matter arrives at the outskirts of the *bound* material, not at the
+    // nominal frame edge — dropping it far outside the mass leaves it with
+    // nothing to orbit, and lets the frame drift open a little further every
+    // time it happens.
+    const r0 = Math.max(80, this.boundRadius * 0.5);
+
     while (left >= PARTICLE_MASS) {
       const m = PARTICLE_MASS;
-      const a = this.rng.angle();
-      const r = this.radius * this.rng.range(0.55, 0.99);
-      const inward = this.rng.range(2, 18);
-      const vc = this.circularSpeed(r) * this.rng.range(0.94, 1.12);
-      const tx = -Math.sin(a) * this.spin * vc;
-      const ty = Math.cos(a) * this.spin * vc;
+      const a = mouth + this.rng.gauss(0, 0.9);
+      const r = r0 * this.rng.range(0.75, 1.12);
+      const vc = this.circularScale(r);
+      // Injected on a loosely bound, eccentric orbit: enough angular momentum
+      // to swing past the centre rather than fall straight in, but not so much
+      // that it parks in a circle at the radius it arrived at.
+      const tang = vc * this.rng.range(0.72, 1.0) * this.spin;
+      const infall = vc * this.rng.range(0.05, 0.3);
       const i = this.pool.spawn(
         PT.GAS,
         Math.cos(a) * r,
         Math.sin(a) * r,
-        tx - Math.cos(a) * inward + this.rng.gauss(0, 14),
-        ty - Math.sin(a) * inward + this.rng.gauss(0, 14),
+        -Math.cos(a) * infall - Math.sin(a) * tang + this.rng.gauss(0, vc * 0.12),
+        -Math.sin(a) * infall + Math.cos(a) * tang + this.rng.gauss(0, vc * 0.12),
         m,
         this.rng.range(2400, 5200),
         2.6
@@ -1062,6 +1136,15 @@ export class Universe {
       left -= m;
       this.reservoir -= m;
     }
+  }
+
+  /** Direction the feeding umbilical enters from, in local coordinates. */
+  _mouthAngle() {
+    if (this._mouth === undefined || this.age - this._mouthAt > 9) {
+      this._mouth = this.rng.angle();
+      this._mouthAt = this.age;
+    }
+    return this._mouth;
   }
 
   _classify() {

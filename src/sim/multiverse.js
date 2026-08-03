@@ -18,8 +18,8 @@ import { makeRNG, hashSeed } from '../engine/rng.js';
 import { resetBodyIds } from './bodies.js';
 
 const MAX_ACTIVE = 12;
-const ROOT_CAPACITY = 6800;
-const CHILD_CAPACITY = 3400;
+const ROOT_CAPACITY = 4600;
+const CHILD_CAPACITY = 2400;
 const ROOT_MASS = 6200;
 const CULL_GRACE = 70; // seconds a young universe is safe from culling —
 // long enough that every universe gets a fair chance to produce a singularity
