@@ -1,6 +1,6 @@
 // Multi-seed selection test.
 //
-//   node tools/selection.mjs [minutes] [runs]
+//   node tools/selection.mjs [minutes] [runs] [seed-prefix]
 //
 // A single run is mostly mutation noise — a handful of universes per generation
 // is a tiny sample. This pools independent seeds and reports, per gene, how the
@@ -13,6 +13,10 @@ import { GENES } from '../src/sim/genome.js';
 
 const minutes = Number(process.argv[2] || 20);
 const runs = Number(process.argv[3] || 8);
+// Batches must use different prefixes to be independent. Re-running with more
+// runs but the same prefix re-uses every earlier seed, so the second result is
+// not a replication of the first — it contains it.
+const prefix = process.argv[4] || 'run';
 const DT = 1 / 60;
 const steps = Math.round((minutes * 60) / DT);
 
@@ -27,7 +31,7 @@ let recycled = 0;
 let deepest = 0;
 
 for (let r = 0; r < runs; r++) {
-  const mv = new Multiverse(`run-${r}`);
+  const mv = new Multiverse(`${prefix}-${r}`);
   for (let i = 0; i < steps; i++) mv.step(DT);
   const s = mv.selectionSummary();
   const c = mv.counts();
@@ -49,7 +53,7 @@ const sd = (a) => {
   return Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / Math.max(1, a.length - 1));
 };
 
-console.log(`\n${runs} seeds × ${minutes} min — ${born} universes born, ${recycled} recycled, deepest generation ${deepest}`);
+console.log(`\nseed prefix "${prefix}" · ${runs} seeds × ${minutes} min — ${born} universes born, ${recycled} recycled, deepest generation ${deepest}`);
 console.log('\ndrift as a fraction of each gene\'s range (founder → current generations)\n');
 console.log('  gene                       mean      sd    t     runs up');
 for (const g of GENES) {

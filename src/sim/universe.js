@@ -113,6 +113,8 @@ export class Universe {
     this.massReceived = dowry;
     this.massReturned = 0;
     this.peakStars = 0;
+    /** Summed birth mass of every star ever formed here, for diagnostics. */
+    this.starMassTotal = 0;
     /** Own-clock time of the most recent stellar collapse. A universe that
      *  stops producing singularities is, in this theory, a dead end. */
     this.lastCollapse = 0;
@@ -653,6 +655,7 @@ export class Universe {
       const star = new Star(mx / mass, my / mass, px / mass, py / mass, mass, this.rng);
       this.stars.push(star);
       this.starsFormed++;
+      this.starMassTotal += mass;
       if (this.stars.length > this.peakStars) this.peakStars = this.stars.length;
     }
   }
