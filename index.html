@@ -53,7 +53,9 @@
           <h2>Selection <span class="hint">no fitness function is applied</span></h2>
           <p class="explain">
             Drift of the mean constants from the founding universe to the newest generations.
-            Universes that make more black holes simply leave more descendants.
+            Universes that make more black holes leave more descendants — nothing else pushes
+            these values. Over a short run this is mostly mutation noise; the signal needs
+            many generations.
           </p>
           <div class="drift" id="drift"></div>
           <div class="legend">
@@ -89,6 +91,9 @@
         <button id="btn-up" class="tbtn wide" title="Ascend to parent universe (Backspace)">↑ ascend</button>
         <button id="btn-fittest" class="tbtn wide" title="Jump to the most fecund universe (F)">◎ fittest</button>
         <button id="btn-labels" class="tbtn wide" title="Toggle labels (L)">labels</button>
+        <button id="btn-panels" class="tbtn wide narrow-only" title="Show the read-outs" aria-expanded="false">
+          read-outs
+        </button>
         <button id="btn-ui" class="tbtn wide" title="Hide interface (H)">hide&nbsp;ui</button>
         <label class="seed">
           <input id="seed" type="text" value="fecundity" spellcheck="false" />

@@ -22,8 +22,10 @@
   --accent: #ffd9a0;
   --grid: rgba(150, 175, 220, 0.1);
 
+  /* No webfonts: the page must run offline and from file://, and a linked
+     face that silently fails to load is worse than a deliberate system stack. */
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
 * {
@@ -479,6 +481,16 @@ body {
   background: rgba(255, 255, 255, 0.11);
   color: var(--text-primary);
 }
+.tbtn:focus-visible,
+.seed input:focus-visible,
+.speed input:focus-visible,
+.tnode:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.tnode:focus-visible {
+  outline-offset: -1px;
+}
 .tbtn:disabled {
   opacity: 0.35;
   cursor: default;
@@ -539,34 +551,68 @@ body {
   }
 }
 
+/* On a narrow screen the read-outs would bury the thing they describe, so the
+   canvas gets the viewport and the panels become an overlay you ask for. */
+.narrow-only {
+  display: none;
+}
+
 @media (max-width: 900px) {
   #ui {
     grid-template-columns: 1fr;
-    grid-template-rows: 1fr auto auto;
+    grid-template-rows: minmax(0, 1fr) auto auto;
     padding: 10px;
   }
-  .rail-left {
-    grid-column: 1;
-    max-height: 34vh;
+  .narrow-only {
+    display: inline-block;
   }
-  .rail-right {
+  .rail {
     grid-column: 1;
     grid-row: 1;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+  }
+  .rail-left {
+    align-self: start;
+    max-height: 30vh;
+  }
+  .rail-right {
     align-self: end;
-    max-height: 34vh;
+    max-height: 36vh;
   }
-  .brand .sub,
+  #ui.panels .rail {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .brand,
   #panel-tree,
-  #panel-log {
-    display: none;
-  }
+  #panel-log,
   .hint-bar {
     display: none;
+  }
+  .stat-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .transport {
+    gap: 6px;
+    padding: 6px 8px;
+  }
+  .seed input {
+    width: 74px;
+  }
+  .speed input {
+    width: 70px;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  #ui {
+  #ui,
+  .rail,
+  .tbtn {
     transition: none;
   }
 }

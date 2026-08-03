@@ -31,13 +31,19 @@ the order of 10⁻⁴ out of 6200, which is float32 rounding on the particle sto
 else. This is what makes the system perpetual rather than merely long-running.
 
 **Nothing selects for anything.** There is no fitness function anywhere in the codebase. A
-universe reproduces when one of its black holes has swallowed enough matter, full stop. The
-gene drift shown in the readout is differential reproduction and nothing else: universes
-that collapse more of their matter into singularities leave more descendants, so their gene
-values are over-represented in the census of universes ever born.
+universe reproduces when one of its black holes has swallowed enough matter, full stop.
+Whatever drift appears in the readout is differential reproduction and nothing else:
+universes that collapse more of their matter into singularities leave more descendants, so
+their gene values are over-represented in the census of universes ever born.
 
 `fecundity()` in `src/sim/genome.js` is descriptive only — it is read by the HUD and by the
 recycling policy for choosing which spent branch to reclaim, never by the physics.
+
+**Does the drift actually show up?** Not yet, at the timescales you can watch. See
+[Does selection actually bite?](#does-selection-actually-bite) — the honest answer is that
+the *mechanism* is real and running, but over a quarter of an hour the multiverse only gets
+two or three generations deep, and the measured gene drift is not separable from mutation
+noise. `tools/selection.mjs` is there so you can check that claim rather than take it.
 
 ## Running it
 

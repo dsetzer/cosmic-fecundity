@@ -73,6 +73,28 @@ const descMatch = html.match(/name="description"\s*\n?\s*content="([^"]*)"/);
 const description = descMatch ? descMatch[1].replace(/\s+/g, ' ').trim() : '';
 const iconMatch = html.match(/<link\s+rel="icon"[\s\S]*?\/>/);
 
+// An artifact host supplies its own <!doctype>, <head> and <body>, so the
+// fragment build emits only what goes inside the body.
+if (process.env.FRAGMENT) {
+  const fragment = `<title>${title}</title>
+<style>
+${css}
+</style>
+${body}
+<script>
+${banner}
+(function () {
+'use strict';
+${code}
+})();
+</script>
+`;
+  mkdirSync(dirname(out), { recursive: true });
+  writeFileSync(out, fragment);
+  console.log(`wrote ${out}  (${(fragment.length / 1024).toFixed(1)} kB, fragment)`);
+  process.exit(0);
+}
+
 const page = `<!doctype html>
 <html lang="en">
   <head>

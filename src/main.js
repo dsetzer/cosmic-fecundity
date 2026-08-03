@@ -203,6 +203,13 @@ document.getElementById('btn-labels').addEventListener('click', (e) => {
   e.currentTarget.classList.toggle('on', !renderer.showLabels);
 });
 document.getElementById('btn-ui').addEventListener('click', () => ui.classList.toggle('hidden'));
+
+const btnPanels = document.getElementById('btn-panels');
+btnPanels.addEventListener('click', () => {
+  const open = ui.classList.toggle('panels');
+  btnPanels.classList.toggle('on', open);
+  btnPanels.setAttribute('aria-expanded', String(open));
+});
 document.getElementById('btn-reset').addEventListener('click', restart);
 
 function restart() {

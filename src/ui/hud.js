@@ -253,7 +253,15 @@ export class HUD {
         `<span>U${u.id}</span>` +
         `<span class="meta">${u.stars.length}★ ${u.blackHoles.length}● ${u.children.length}⇣</span>`;
       node.title = `Universe ${u.id}, generation ${u.generation} — click to travel here`;
+      node.tabIndex = 0;
+      node.setAttribute('role', 'button');
       node.addEventListener('click', () => this.onSelect(u));
+      node.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          this.onSelect(u);
+        }
+      });
       frag.appendChild(node);
     }
     this.nodes.tree.replaceChildren(frag);
