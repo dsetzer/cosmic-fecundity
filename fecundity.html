@@ -1,0 +1,724 @@
+<title>Cosmic Fecundity</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #04030a; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  .caption {
+    position: fixed; left: 0; right: 0; bottom: 20px;
+    text-align: center; pointer-events: none;
+    font: 400 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.22em; text-transform: uppercase;
+    color: rgba(206, 198, 232, 0.4);
+  }
+</style>
+
+<canvas id="c"></canvas>
+<div class="caption">every black hole is a universe</div>
+
+<script>
+(function () {
+  'use strict';
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, HALFDIAG = 0;
+
+  const TAU = Math.PI * 2;
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const pick = (a) => a[(Math.random() * a.length) | 0];
+  const ease = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
+
+  // ---------------------------------------------------------------- sprites
+  // Every luminous thing on screen is one of a handful of cached radial
+  // gradients, stamped additively. Overlapping copies sum into something that
+  // reads as plasma, and it costs a blit instead of a path fill.
+  const sprites = new Map();
+  function glow(color, px = 64, core = 0, falloff = 2.6) {
+    const key = color + '|' + px + '|' + core + '|' + falloff;
+    let s = sprites.get(key);
+    if (s) return s;
+    s = document.createElement('canvas');
+    s.width = s.height = px;
+    const g = s.getContext('2d');
+    const r = px / 2;
+    const grad = g.createRadialGradient(r, r, 0, r, r, r);
+    for (let i = 0; i <= 12; i++) {
+      const t = i / 12;
+      const a = t <= core ? 1 : Math.pow(1 - (t - core) / (1 - core), falloff);
+      grad.addColorStop(t, 'rgba(' + color + ',' + a.toFixed(3) + ')');
+    }
+    g.fillStyle = grad;
+    g.fillRect(0, 0, px, px);
+    sprites.set(key, s);
+    return s;
+  }
+
+  const NEBULA = ['118,168,255', '158,120,255', '86,200,238', '212,128,228', '120,220,200', '255,140,180'];
+  const STARLIGHT = ['255,240,215', '208,224,255', '255,204,158'];
+
+  const PLANET = ['186,196,220', '214,172,138', '150,202,190', '204,164,186', '170,178,206'];
+
+  // Set while the camera is punching through a horizon: everything luminous
+  // stretches along the line of travel. `shell` is the opacity of the universe
+  // being left behind, which thins to nothing as the one inside takes over.
+  let warp = 0;
+  // True once the horizon being entered covers the whole screen. Everything the
+  // universe outside it is made of is behind an opaque disc at that point, so
+  // none of it needs drawing — but the disc itself very much does.
+  let occlude = false;
+  // Blackness held over the backdrop straight after a swap, so the frame after
+  // passing through starts identical to the frame before it and the surrounding
+  // space fades up instead of snapping on. This is the whole of the arrival —
+  // there is no flash. The swap is already exact, so anything drawn to mark it
+  // would only be drawing attention to a non-event.
+  let veil = 0;
+
+  const HOLE_R = 0.034;   // event-horizon radius, as a fraction of the disc
+  const CORE_R = 2.6;     // the nucleus, in units of a stellar horizon
+  // How much of the horizon the child universe fills. This one number decides
+  // whether the transition can work at all. The horizon clears the screen at
+  // roughly 1074px; natural framing for a universe is 299px. Set this near 1
+  // and those two moments are 4x apart — which is exactly the overshoot that
+  // forced a reverse zoom. At 0.28 they are the same moment, so the camera can
+  // plunge straight through without ever slowing down or backing up.
+  const CHILD_FILL = 0.28;
+  const MAX_LEVEL = 3;     // nesting kept live below the current root
+
+  // ------------------------------------------------------------------ scene
+  // Nothing here is solved from forces. Motes ride fixed circular orbits with
+  // differential rotation, which winds loose spiral arms on its own and stays
+  // perfectly smooth forever. The eye reads it as a galaxy; the CPU reads it
+  // as a sine and a cosine.
+  //
+  // One rotation curve governs everything in the disc — motes, stars, and the
+  // holes stars leave behind. A remnant keeps the orbit its progenitor had, so
+  // the black holes swing round with the arms instead of hanging in place.
+  const ROT = (rad) => 0.26 / (0.3 + rad);
+
+  class Universe {
+    constructor() {
+      this.tint = pick(NEBULA);
+      this.spin = Math.random() < 0.5 ? 1 : -1;
+      this.age = 0;
+      this.born = 0;
+      this.motes = [];
+      this.stars = [];
+      this.holes = [];
+      this.rings = [];
+      this.starTimer = rand(0.5, 1.8);
+
+      // Three populations. Arms alone leave voids between them and read as a
+      // bare pinwheel, so they sit on a smooth field with a bulge in the middle.
+      const arms = 2 + ((Math.random() * 2) | 0);
+      const swirl = rand(2.2, 3.4);
+      for (let i = 0; i < 1400; i++) {
+        const roll = Math.random();
+        let rad, a, size, col, bright;
+        if (roll < 0.16) {
+          rad = 0.03 + Math.pow(Math.random(), 1.7) * 0.3;
+          a = Math.random() * TAU;
+          size = rand(0.4, 1.6);
+          col = Math.random() < 0.55 ? pick(STARLIGHT) : this.tint;
+          bright = rand(0.3, 0.9);
+        } else if (roll < 0.66) {
+          rad = 0.09 + Math.pow(Math.random(), 0.55) * 0.92;
+          a = (((Math.random() * arms) | 0) * TAU) / arms + rad * swirl + rand(-0.3, 0.3);
+          size = rand(0.7, 2.6);
+          col = Math.random() < 0.24 ? pick(STARLIGHT) : this.tint;
+          bright = rand(0.4, 1);
+        } else {
+          rad = 0.08 + Math.pow(Math.random(), 0.7) * 0.95;
+          a = Math.random() * TAU;
+          size = rand(0.5, 1.8);
+          col = Math.random() < 0.16 ? pick(STARLIGHT) : this.tint;
+          bright = rand(0.28, 0.72);
+        }
+        this.motes.push({
+          rad, a, size, col, bright,
+          w: ROT(rad) * this.spin,
+          tw: rand(0, TAU),
+          tws: rand(1.1, 3.2),
+        });
+      }
+
+      // The nucleus. Every galaxy has one, it is there from the beginning, and
+      // under the theory it is a universe like any other — but it is ONE, and
+      // the disc will go on making millions of the small ones.
+      this.holes.push({
+        rad: 0, a: 0, w: 0, size: 1, core: true,
+        open: 1, flash: 0, spin: rand(0, TAU), child: null, planets: null,
+      });
+
+      // Stars whipping round the nucleus on near-Keplerian orbits, the way the
+      // S-cluster does around Sgr A*. Fast enough to visibly precess.
+      const inner = HOLE_R * CORE_R;
+      for (let i = 0; i < 70; i++) {
+        const rad = inner * rand(1.25, 3.1);
+        this.motes.push({
+          rad,
+          a: Math.random() * TAU,
+          size: rand(0.5, 1.5),
+          col: pick(STARLIGHT),
+          bright: rand(0.45, 1),
+          w: (0.021 / Math.pow(rad, 1.5)) * this.spin,
+          tw: rand(0, TAU),
+          tws: rand(1.4, 3.6),
+        });
+      }
+    }
+
+    /** Kick things off mid-story so a fresh universe is never dull. */
+    prime() {
+      this.born = 1;
+      this.age = 6;
+      this.holes[0].size = CORE_R;
+      this._star(0.72);
+      this._star(0.15);
+      return this;
+    }
+
+    _star(progress) {
+      const life = rand(5, 9);
+      const rad = rand(0.2, 0.8);
+      // A handful of worlds, which is the whole point: they keep these orbits
+      // after the star dies, and an orbit around nothing is unmistakably a
+      // black hole rather than a hole cut in the picture.
+      const planets = [];
+      const np = 2 + ((Math.random() * 3) | 0);
+      let pr = 0.04;
+      for (let i = 0; i < np; i++) {
+        pr += rand(0.016, 0.03);
+        planets.push({
+          r: pr,
+          a: Math.random() * TAU,
+          w: (1.1 / Math.pow(pr / 0.05, 1.5)) * this.spin,
+          size: rand(1, 2.1),
+          col: pick(PLANET),
+        });
+      }
+      this.stars.push({
+        planets,
+        rad,
+        a: Math.random() * TAU,
+        w: ROT(rad) * this.spin,
+        t: life * (progress || 0),
+        life,
+        size: rand(1, 1.8),
+        col: pick(STARLIGHT),
+        // In Smolin's picture there is no threshold to clear: a star that
+        // collapses becomes a singularity, and that singularity is a universe.
+        doomed: Math.random() < 0.5,
+      });
+    }
+
+    update(dt, level) {
+      this.age += dt;
+      if (this.born < 1) this.born = Math.min(1, this.born + dt * 0.7);
+
+      for (let i = 0; i < this.motes.length; i++) {
+        const m = this.motes[i];
+        m.a += m.w * dt;
+        m.tw += m.tws * dt;
+      }
+
+      this.starTimer -= dt;
+      if (this.starTimer <= 0 && this.stars.length < 4) {
+        this.starTimer = rand(1.3, 3.0);
+        this._star(0);
+      }
+
+      for (let i = this.stars.length - 1; i >= 0; i--) {
+        const s = this.stars[i];
+        s.t += dt;
+        s.a += s.w * dt;
+        for (const q of s.planets) q.a += q.w * dt;
+        if (s.t < s.life) continue;
+        this.stars.splice(i, 1);
+        if (s.doomed && this.holes.length < 4) {
+          // The remnant keeps its progenitor's orbit exactly. It is the same
+          // object, minus the light.
+          this.holes.push({
+            rad: s.rad, a: s.a, w: s.w, size: 1, core: false,
+            open: 0, flash: 1, spin: 0, child: null, planets: s.planets,
+          });
+          this.rings.push({ rad: s.rad, a: s.a, t: 0, life: 1.6, col: '255,224,188', big: 1 });
+        } else {
+          this.rings.push({ rad: s.rad, a: s.a, t: 0, life: 1.2, col: s.col, big: 0.45 });
+        }
+      }
+
+      for (let i = 0; i < this.holes.length; i++) {
+        const h = this.holes[i];
+        h.open = Math.min(1, h.open + dt * 0.55);
+        h.flash = Math.max(0, h.flash - dt * 1.5);
+        h.spin += dt * 1.7;
+        h.a += h.w * dt;
+        if (h.planets) for (const q of h.planets) q.a += q.w * dt;
+        // A seed, then accretion and mergers. Whatever the seed channel turns
+        // out to be, the nucleus is not born at the mass we observe it at.
+        if (h.core) h.size += (CORE_R - h.size) * Math.min(1, dt * 0.13);
+        // Every hole is a universe, but only the ones you might actually reach
+        // get built. Below the root, one branch is enough — three-way branching
+        // costs forty live universes by depth three and shows almost none of it.
+        if (!h.child && h.open > 0.42 && level < MAX_LEVEL && (level === 0 || i === 0)) {
+          h.child = new Universe();
+        }
+        if (h.child && level < MAX_LEVEL) h.child.update(dt, level + 1);
+      }
+
+      for (let i = this.rings.length - 1; i >= 0; i--) {
+        const r = this.rings[i];
+        r.t += dt;
+        if (r.t > r.life) this.rings.splice(i, 1);
+      }
+    }
+
+    // ------------------------------------------------------------------ draw
+    draw(cx, cy, R0, alpha, level) {
+      const R = R0;
+      // Inflation is a scale factor, not an explosion with a location. The disc
+      // occupies its whole extent from the first instant; what changes is the
+      // separation between everything in it. There is no centre it grows from
+      // and no edge it grows into, which is why, from anywhere inside, it looks
+      // like it is expanding everywhere at once.
+      const RD = R * (0.14 + 0.86 * ease(this.born));
+      if (alpha <= 0.02 || R < 1.5) return;
+      // Everything this universe contains, holes and their glow included, fits
+      // inside 1.6R of its centre, so if that box misses the screen, all of it
+      // does. (This used to bail only for small R, which meant a universe zoomed
+      // to thirty thousand pixels across drew its every hole from off screen.)
+      if (cx + R * 1.6 < 0 || cx - R * 1.6 > W || cy + R * 1.6 < 0 || cy - R * 1.6 > H) return;
+
+      // Inside a horizon that already fills the screen, none of the surrounding
+      // universe is visible — but its holes still draw, because the one being
+      // entered is the opaque disc doing the covering.
+      const own = alpha;
+      const lit = !(level === 0 && occlude);
+
+      ctx.globalCompositeOperation = 'lighter';
+
+      // Bubble haze, plus a tighter nucleus. Both fade off once the disc is
+      // larger than the screen — otherwise standing inside a universe means
+      // standing inside a flat wash of its own tint.
+      const wide = 1 / (1 + (R / HALFDIAG) * (R / HALFDIAG));
+      if (lit && own * wide > 0.03 && warp < 0.3) {
+        // Skipped outright once faint: these are the two largest blits in the
+        // frame, and scaling a sprite to several screen-widths is not free.
+        ctx.globalAlpha = own * 0.5 * wide;
+        ctx.drawImage(glow(this.tint, 128, 0, 1.6), cx - R * 1.5, cy - R * 1.5, R * 3, R * 3);
+        ctx.globalAlpha = own * 0.34 * wide;
+        ctx.drawImage(glow(this.tint, 128, 0, 2.8), cx - R * 0.55, cy - R * 0.55, R * 1.1, R * 1.1);
+      }
+
+      // The bounce, seen from inside: the whole of space alight at once, not a
+      // fireball expanding through it.
+      if (lit && this.born < 1) {
+        const f = 1 - this.born;
+        ctx.globalAlpha = own * f * f * 0.85;
+        ctx.drawImage(glow('236,240,255', 128, 0.35, 1.4), cx - R * 1.2, cy - R * 1.2, R * 2.4, R * 2.4);
+      }
+
+      // Motes. Skipped wholesale once this universe has faded past seeing; its
+      // holes below still run, because the destination is inside one of them.
+      const unit = R / 320;
+      if (lit) {
+      // Level of detail by on-screen size, not by nesting depth: a disc only a
+      // hundred pixels across does not need every mote resolved.
+      let step = R > 150 ? 1 : R > 60 ? 2 : 3;
+      // A streak covers many times the area of a point, so at speed the same
+      // frame budget buys far fewer of them. Thinning them out alone would just
+      // look like a dimming, so the survivors carry the missing light.
+      const dec = warp > 0.5 ? 3 : warp > 0.15 ? 2 : 1;
+      const relight = Math.min(2.1, dec);
+      step *= dec;
+      for (let i = 0; i < this.motes.length; i += step) {
+        const m = this.motes[i];
+        const px = cx + Math.cos(m.a) * m.rad * RD;
+        const py = cy + Math.sin(m.a) * m.rad * RD;
+        if (px < -30 || px > W + 30 || py < -30 || py > H + 30) continue;
+        const tw = 0.72 + 0.28 * Math.sin(m.tw);
+        const s = m.size * tw * unit * 7.5;
+        if (s < 0.7 || s > 420) continue;
+        // Close up a mote is a screen-sized smear that adds fog and costs a
+        // full-frame blend, so dim it as it swells and drop it once it is huge.
+        let a = own * m.bright * tw * 0.62 * relight;
+        if (s > 150) a *= 150 / s;
+        if (a < 0.02) continue;
+        ctx.globalAlpha = a;
+        if (warp <= 0.001) {
+          ctx.drawImage(glow(m.col), px - s / 2, py - s / 2, s, s);
+          continue;
+        }
+        // Drawn out along the line of travel. Things off to the side sweep past
+        // faster than things dead ahead, so they stretch further — which is what
+        // sells it as speed rather than a blur filter.
+        const dx = px - W / 2, dy = py - H / 2;
+        const d = Math.hypot(dx, dy) || 1;
+        const len = Math.min(230, s * (1 + warp * warp * 15 * (0.2 + d / HALFDIAG)));
+        ctx.setTransform(DPR * (dx / d), DPR * (dy / d), -DPR * (dy / d), DPR * (dx / d), DPR * px, DPR * py);
+        ctx.drawImage(glow(m.col), -len / 2, -s / 2, len, s);
+        ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      }
+      }
+
+      // Shockwaves. Arc strokes are not cheap and nothing reads at speed.
+      if (lit && warp < 0.3) for (let i = 0; i < this.rings.length; i++) {
+        const r = this.rings[i];
+        const k = r.t / r.life;
+        ctx.globalAlpha = own * (1 - k) * 0.7;
+        ctx.strokeStyle = 'rgba(' + r.col + ',1)';
+        ctx.lineWidth = Math.max(0.5, (1 - k) * 3 * unit);
+        ctx.beginPath();
+        ctx.arc(cx + Math.cos(r.a) * r.rad * RD, cy + Math.sin(r.a) * r.rad * RD, k * r.big * R * 0.42, 0, TAU);
+        ctx.stroke();
+      }
+
+      // Stars: swell, redden, tremble, and — if they are heavy enough — fall in
+      // on themselves. The implosion is the beat that makes the black hole
+      // legible; without it a hole just appears where a star used to be.
+      if (lit) for (let i = 0; i < this.stars.length; i++) {
+        const s = this.stars[i];
+        const k = s.t / s.life;
+        const px = cx + Math.cos(s.a) * s.rad * RD;
+        const py = cy + Math.sin(s.a) * s.rad * RD;
+        this._drawSystem(px, py, s.planets, R, own, false);
+
+        let swell = 1 + k * k * k * 2.2;
+        let core = 0.32;
+        const fall = s.doomed ? (s.t - (s.life - 0.5)) / 0.5 : -1;
+        if (fall > 0) {
+          // Freefall: the envelope drops away in well under a second, and what
+          // is left of the light is squeezed into a point.
+          swell *= Math.max(0.05, 1 - fall * fall * 0.97);
+          core = 0.32 + fall * 0.5;
+        }
+        const size = s.size * swell * unit * 13;
+        if (size < 0.8) continue;
+        ctx.globalAlpha = own * 0.85;
+        ctx.drawImage(glow(k > 0.75 && s.doomed ? '255,166,118' : s.col, 64, 0.07, 2.4),
+          px - size / 2, py - size / 2, size, size);
+        const cs = size * core;
+        ctx.globalAlpha = own;
+        ctx.drawImage(glow('255,255,255', 32, 0.32, 2), px - cs / 2, py - cs / 2, cs, cs);
+        if (s.doomed && k > 0.82) {
+          const t = (k - 0.82) / 0.18;
+          ctx.globalAlpha = own * t * (0.5 + 0.5 * Math.sin(s.t * 34));
+          const ws = size * 2.3 * (fall > 0 ? 1 + fall * 3 : 1);
+          ctx.drawImage(glow('255,138,88', 64, 0.02, 2), px - ws / 2, py - ws / 2, ws, ws);
+        }
+      }
+
+      // Singularities, each with its cosmos inside.
+      for (let i = 0; i < this.holes.length; i++) {
+        const h = this.holes[i];
+        this._drawHole(cx + Math.cos(h.a) * h.rad * RD, cy + Math.sin(h.a) * h.rad * RD,
+          Math.max(1.2, R * HOLE_R * h.size * h.open), h, own, alpha, level);
+      }
+
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    /** Worlds on their orbits — the same ones before and after the collapse. */
+    _drawSystem(x, y, planets, R, alpha, orbits) {
+      if (!planets) return;
+      const first = planets[0].r * R;
+      if (first < 3) return;
+      if (orbits && first > 26 && warp < 0.2) {
+        // Only once the system is big enough to read. Any earlier and it is a
+        // scribble; this way the orbits resolve as you fall toward them.
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = alpha * Math.min(0.16, (first - 26) / 400);
+        ctx.strokeStyle = 'rgba(190,205,235,1)';
+        ctx.lineWidth = Math.max(0.5, R * 0.0009);
+        for (const q of planets) {
+          ctx.beginPath();
+          ctx.arc(x, y, q.r * R, 0, TAU);
+          ctx.stroke();
+        }
+      }
+      ctx.globalCompositeOperation = 'lighter';
+      for (const q of planets) {
+        // Capped: a world seen from close up is a small hard disc, not a cloud.
+        // Without the clamp they swell into blobs the size of the star they lost.
+        const s = Math.min(22, q.size * (R / 320) * 5.5);
+        if (s < 0.6) continue;
+        const px = x + Math.cos(q.a) * q.r * R;
+        const py = y + Math.sin(q.a) * q.r * R;
+        if (px < -20 || px > W + 20 || py < -20 || py > H + 20) continue;
+        ctx.globalAlpha = alpha * 0.55;
+        ctx.drawImage(glow(q.col, 32, 0.1, 2.4), px - s, py - s, s * 2, s * 2);
+        ctx.globalAlpha = alpha;
+        ctx.drawImage(glow(q.col, 32, 0.62, 2.6), px - s / 2, py - s / 2, s, s);
+      }
+    }
+
+    _drawHole(x, y, hr, h, alpha, kidAlpha, level) {
+      // hr * 8 is the outer reach of the lensing glow. Beyond that there is
+      // nothing to draw, at any size.
+      if (x + hr * 8 < 0 || x - hr * 8 > W || y + hr * 8 < 0 || y - hr * 8 > H) return;
+
+      // Light smeared around the shadow. Both the reach and the strength have
+      // to fall off as the horizon fills the frame, or the glow stops being a
+      // halo and becomes a fog over the whole screen.
+      const reach = Math.min(hr * 7, HALFDIAG * 1.15);
+      const near = 1 / (1 + Math.pow(hr / (HALFDIAG * 0.22), 1.6));
+      ctx.globalCompositeOperation = 'lighter';
+      if (alpha * near > 0.04 && warp < 0.45) {
+        ctx.globalAlpha = alpha * near;
+        const lens = ctx.createRadialGradient(x, y, hr * 0.9, x, y, reach);
+        lens.addColorStop(0, 'rgba(255,220,175,0.55)');
+        lens.addColorStop(0.16, 'rgba(255,163,88,0.24)');
+        lens.addColorStop(0.5, 'rgba(150,110,235,0.09)');
+        lens.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = lens;
+        ctx.beginPath();
+        ctx.arc(x, y, reach, 0, TAU);
+        ctx.fill();
+      }
+
+      if (h.flash > 0) {
+        const s = hr * (8 + 44 * (1 - h.flash));
+        ctx.globalAlpha = alpha * h.flash * h.flash;
+        ctx.drawImage(glow('255,255,255', 128, 0.02, 2), x - s / 2, y - s / 2, s, s);
+      }
+
+      // The one opaque thing on screen.
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.arc(x, y, hr, 0, TAU);
+      ctx.fill();
+
+      // And the universe behind it. Clipped to the horizon, so from far away it
+      // is a black disc and up close it is everything.
+      // Held back until the horizon is large on screen. Lit from across the
+      // galaxy it reads as a portal; a black hole at that distance is a black
+      // disc and nothing else.
+      if (h.child) {
+        const cr = hr * CHILD_FILL;
+        if (cr > 15) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(x, y, hr, 0, TAU);
+          ctx.clip();
+          h.child.draw(x, y, cr, kidAlpha * Math.min(1, (cr - 15) / 45), level + 1);
+          ctx.restore();
+        }
+      }
+
+      // Photon ring, brighter on the approaching side. The width is capped so
+      // that up close it stays a rim of light rather than a white wall.
+      ctx.globalCompositeOperation = 'lighter';
+      const lw = Math.min(Math.max(0.8, hr * 0.13), 18);
+      const gx = Math.cos(h.spin) * hr, gy = Math.sin(h.spin) * hr;
+      const dg = ctx.createLinearGradient(x - gx, y - gy, x + gx, y + gy);
+      dg.addColorStop(0, 'rgba(255,255,255,0.95)');
+      dg.addColorStop(0.5, 'rgba(255,196,120,0.6)');
+      dg.addColorStop(1, 'rgba(186,122,255,0.32)');
+      ctx.strokeStyle = dg;
+      // A soft bloom under a crisp rim, so it reads as light rather than trim.
+      ctx.globalAlpha = alpha * Math.max(0.3, near) * 0.4;
+      ctx.lineWidth = lw * 3.5;
+      ctx.beginPath();
+      ctx.arc(x, y, hr + lw * 0.4, 0, TAU);
+      ctx.stroke();
+      ctx.globalAlpha = alpha * Math.max(0.72, near);
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      ctx.arc(x, y, hr + lw * 0.3, 0, TAU);
+      ctx.stroke();
+
+      // Still going round, still on the same orbits, with nothing at the centre
+      // to light them any more.
+      this._drawSystem(x, y, h.planets, hr / HOLE_R, alpha, true);
+    }
+  }
+
+  // ----------------------------------------------------------------- camera
+  // One continuous accelerating fall, all the way through. The horizon grows
+  // until its edge leaves the frame; at that exact moment the universe inside it
+  // has reached the size a universe is drawn at, so it is promoted to root and
+  // nothing on screen moves. Zoom never decreases and never eases to a stop —
+  // the only thing that ends is the parent, which thins away as you pass it.
+
+  const DIVE_RATE = 0.36;   // e-folds per second, falling in
+  const WARP_BOOST = 2.2;   // extra pull once the streaks come up
+  const WARP_IN = 0.85;     // seconds to reach full stretch
+  const WARP_OUT = 1.2;     // seconds to settle out of it
+  let root = null, target = null;
+  let camX = 0, camY = 0, zoom = 1, mode = 'hold', hold = 2.4, lock = 0;
+  let time = 0, last = performance.now();
+
+  const baseR = () => Math.min(W, H) * 0.34;
+
+  /** The zoom at which this hole's child is drawn at exactly natural framing. */
+  const framingZoom = (h) => 1 / (HOLE_R * h.size * h.open * CHILD_FILL);
+
+  function camera(dt) {
+    veil = Math.max(0, veil - dt / 0.8);
+    occlude = false;
+
+    if (mode === 'hold') {
+      warp = Math.max(0, warp - dt / WARP_OUT);
+      hold -= dt;
+      if (hold <= 0 && warp <= 0) {
+        // Mostly the disc, occasionally the nucleus. That ratio is the whole
+        // argument: the small ones are where the offspring come from.
+        const stellar = root.holes.filter((h) => h.child && !h.core);
+        const core = root.holes.find((h) => h.child && h.core);
+        const best = stellar.length && (!core || Math.random() < 0.75) ? pick(stellar) : core;
+        if (best) { target = best; lock = 0; mode = 'dive'; }
+      }
+      return;
+    }
+
+    if (!target || root.holes.indexOf(target) < 0) {
+      target = null; mode = 'hold'; hold = 1.4; return;
+    }
+
+    // The target is orbiting, and at a hundred times magnification a hundredth
+    // of a radian is many screens. Ease onto it, then track it exactly.
+    lock = Math.min(1, lock + dt / 1.2);
+    const k = Math.max(lock * lock, Math.min(1, 4 * dt));
+    camX += (Math.cos(target.a) * target.rad - camX) * k;
+    camY += (Math.sin(target.a) * target.rad - camY) * k;
+
+    const zt = framingZoom(target);
+    zoom *= Math.exp(DIVE_RATE * (mode === 'warp' ? WARP_BOOST : 1) * dt);
+
+    if (mode === 'dive') {
+      if (zoom >= zt * 0.3 && target.child) mode = 'warp';
+      return;
+    }
+
+    warp = Math.min(1, warp + dt / WARP_IN);
+    // Past this point the horizon covers every corner of the screen, so the
+    // universe outside it has nothing left to contribute.
+    occlude = baseR() * zoom * HOLE_R * target.size * target.open >= HALFDIAG * 1.02;
+
+    if (zoom >= zt && warp >= 1) {
+      // Whatever the zoom happens to be, dividing by zt reproduces the child at
+      // precisely the size it was already being drawn — the promotion is exact
+      // even if this frame overshot.
+      const carry = zoom / zt;
+      root = target.child;
+      root.born = 1;
+      target = null;
+      zoom = carry;
+      camX = 0;
+      camY = 0;
+      // We came through a screen filled edge to edge with the inside of an event
+      // horizon, so that is what the next frame opens on. Space fades up from it.
+      veil = 1;
+      mode = 'hold';
+      hold = 2.6;
+    }
+  }
+
+  // --------------------------------------------------------------- backdrop
+  let backdrop = null, bw = 0, bh = 0;
+  function makeBackdrop() {
+    // Only when the viewport itself changed — a quality step must not reshuffle
+    // the star field under the viewer.
+    if (backdrop && bw === W && bh === H) return;
+    bw = W; bh = H;
+    backdrop = document.createElement('canvas');
+    backdrop.width = Math.max(1, W);
+    backdrop.height = Math.max(1, H);
+    const g = backdrop.getContext('2d');
+    g.fillStyle = '#04030a';
+    g.fillRect(0, 0, W, H);
+    const grd = g.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.7);
+    grd.addColorStop(0, 'rgba(36,26,72,0.5)');
+    grd.addColorStop(0.6, 'rgba(13,9,30,0.3)');
+    grd.addColorStop(1, 'rgba(3,2,8,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, W, H);
+    for (let i = 0; i < 380; i++) {
+      g.fillStyle = 'rgba(200,210,255,' + (Math.random() * 0.45 + 0.05).toFixed(3) + ')';
+      g.beginPath();
+      g.arc(Math.random() * W, Math.random() * H, Math.random() * 1.1 + 0.2, 0, TAU);
+      g.fill();
+    }
+  }
+
+  // ------------------------------------------------------------------- loop
+  // The piece is fill-rate bound — it is thousands of additive blends over the
+  // whole frame — so the honest lever on a slow machine is resolution, not
+  // detail. Drop the backing store and let CSS scale it back up.
+  let qual = 1, qualClock = 0, slow = 0;
+  function pace(dt) {
+    qualClock += dt;
+    slow = slow * 0.9 + (dt > 0.026 ? 0.1 : 0);
+    if (qualClock < 2) return;
+    qualClock = 0;
+    const want = slow > 0.5 ? Math.max(0.55, qual - 0.2) : slow < 0.1 ? Math.min(1, qual + 0.2) : qual;
+    if (want !== qual) { qual = want; resize(); }
+  }
+
+  function resize() {
+    DPR = Math.min(1.75, window.devicePixelRatio || 1) * qual;
+    W = canvas.clientWidth || window.innerWidth;
+    H = canvas.clientHeight || window.innerHeight;
+    HALFDIAG = Math.hypot(W, H) / 2;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    makeBackdrop();
+  }
+
+  let paused = false;
+  function frame(now) {
+    const dt = paused ? 0 : Math.min(0.05, (now - last) / 1000) || 0;
+    last = now;
+    time += dt;
+
+    pace(dt);
+    root.update(dt, 0);
+    camera(dt);
+
+    const RS = baseR() * zoom;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+
+    // Drift the field outward with the dive so it does not sit there rigid
+    // while the rest of the frame rushes past.
+    const bs = 1 + Math.min(0.55, Math.log(Math.max(1, zoom)) * 0.07) + warp * 0.5;
+    ctx.globalAlpha = 1;
+    ctx.drawImage(backdrop, W / 2 - (W * bs) / 2, H / 2 - (H * bs) / 2, W * bs, H * bs);
+    if (veil > 0) {
+      ctx.globalAlpha = veil;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = 1;
+    }
+
+    root.draw(W / 2 - camX * RS, H / 2 - camY * RS, RS, 1, 0);
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.44, W / 2, H / 2, HALFDIAG * 1.05);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(0,0,0,0.5)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
+
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', resize);
+  resize();
+  root = new Universe().prime();
+  requestAnimationFrame(frame);
+
+  window.__fecundity = {
+    get root() { return root; }, get zoom() { return zoom; }, get mode() { return mode; },
+    get target() { return target; }, get camX() { return camX; }, get camY() { return camY; },
+    get warp() { return warp; }, get veil() { return veil; }, get occlude() { return occlude; },
+    set paused(v) { paused = !!v; },
+    get baseR() { return baseR(); },
+  };
+})();
+</script>
