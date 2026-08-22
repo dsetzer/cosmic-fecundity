@@ -70,24 +70,50 @@ secondary image squeezed into a crescent underneath, and the photon ring. The
 sense of rotation is a horizontal mirror of the same texture, so it costs
 nothing extra. Per frame a hole is two blits.
 
-## Stage 2 — real gravity (next)
+## Stage 2 — real gravity — DONE
 
-Replace the kinematic rotation curve with actual forces: Barnes-Hut quadtree,
-gas that cools and clumps, stars igniting where density crosses a threshold
-rather than on a timer, remnants inheriting real momentum. Structure emerges
-instead of being authored.
+Not the way this file originally planned it, and the reason matters.
 
-**Known failure to avoid:** a previous pure-N-body attempt ejected every star
-before it could collapse (259 escapes, 0 deaths in 150 s, no black holes ever
-formed). Stars condensed at stagnation points, were born near rest, plunged
-radially, and gained energy from the starburst breathing mode.
-**Mitigation:** a fixed halo potential holds the disc bound and sets the
-rotation curve; N-body handles local dynamics on top. Standard practice.
-**Gate:** prove it sustains star → collapse → child universe over several
-minutes *before* building any of the pretty layer on it.
+**Barnes-Hut was the wrong tool here.** The plan assumed one universe of a few
+thousand bodies. This scene keeps ten to thirteen universes live at once, three
+thousand stars apiece — forty thousand bodies, every frame. No tree code reaches
+that in a browser. And the previous pure-N-body attempt had already shown the
+other failure: 259 escapes, 0 collapses, no black holes ever formed.
 
-Barnes-Hut was previously validated: root mass exact to 7 significant figures,
-2.9% mean relative force error at θ=0.85, ~15 ms for a 6000-body pass.
+What was actually wrong was never that the motion was unsolved. It was that the
+motion was *circular*: every star on a perfect circle, in one plane, with the
+arms painted on. So the disc now moves by closed-form solutions of motion in a
+galactic potential, and the handful of objects few enough to integrate are
+integrated for real.
+
+- **Epicycles.** Omega(r) is the rotation curve; kappa(r), the epicyclic
+  frequency, is *derived from it* rather than invented, so eccentric orbits
+  swing in and out and precess by the right amount. Old stars are given larger
+  amplitudes than young ones, which is what velocity dispersion does.
+- **Thickness.** nu(r) bobs stars through the midplane. The disc has a scale
+  height, the bulge is a genuine spheroid, and young stars sit in a thin layer.
+- **The arms are a density wave**, not a stream of stars: one pattern speed,
+  stars drifting through it, overtaking inside corotation and lagging outside.
+  This is also the fix for a bug that was already in the scene and invisible —
+  arms made of stars wind themselves shut, and these never can.
+- **Stars and remnants are integrated**, with the galaxy's pull read off the
+  rotation curve plus their softened mutual attraction. Never more than eight
+  per universe. They are launched off the circular speed, so nothing traces a
+  circle; a remnant inherits its progenitor's exact position and velocity.
+- **Planets are Kepler ellipses**, with the trail behind each world spaced by
+  mean anomaly, so it crowds at aphelion the way the second law requires.
+- **The S-cluster is eccentric**, as the real one is.
+
+Gate met: 90 s of soak gives 7 swaps, 0 frames where the zoom reverses, 0 bodies
+escaping the disc, and star to collapse to child universe still cycling at the
+end. Frame cost went *down*, because a closed-form disc needs no integration:
+27 / 31 / 17 ms headless for hold, dive and warp.
+
+### Still open, if the disc should ever emerge rather than be described
+
+Gas that cools and clumps, star formation triggered by density rather than by a
+timer. That needs a real solver and therefore a much smaller body count, or a
+grid. Worth doing only if the current motion still reads as fake.
 
 ## Stage 3 — interaction
 
@@ -171,6 +197,28 @@ step required to run it.
 - **Cull anything that has grown larger than the screen.** A haze blob or a
   dust lane wider than the frame contributes a flat wash and costs a full-frame
   blend to say so.
+
+### From Stage 2
+
+- **Do not integrate what can be solved.** Thousands of disc stars across a
+  dozen nested universes cannot be stepped, and do not need to be: an epicyclic
+  orbit is a closed form in the universe's own clock, so it cannot drift, blow
+  up or accumulate error however long it runs, and it costs less than the
+  integration it replaces.
+- **Spiral arms must be a pattern, not a population.** Arms made of stars wind
+  shut. Modulate brightness by the wave's phase instead, and raise the crest to
+  the fourth power — a plain cosine bump spreads the young stars over half the
+  disc and leaves no arms at all.
+- **Two half-rings that stop at the same axis stack their stroke caps** and lay
+  a bright hairline across the middle of the hole. Round caps make it worse;
+  overlapping the halves makes it a wedge. The fix is to fade each half's
+  gradient to one half over the last one per cent of its length, so the two
+  sum back to one where they meet.
+- **Taper the outer edge of the accretion disc.** Cut off square, edge-on it
+  turns the whole disc into a drawn blade.
+- **The near half of the disc has a straight top edge**, along the line joining
+  its ansae. That is correct — it is the silhouette of a half-annulus — and was
+  checked against an unclipped render before being left alone.
 
 ## Verification method that works
 
