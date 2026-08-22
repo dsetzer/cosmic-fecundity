@@ -1,6 +1,6 @@
 <title>Cosmic Fecundity</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #04030a; overflow: hidden; }
+  html, body { margin: 0; height: 100%; background: #030306; overflow: hidden; }
   canvas { display: block; width: 100vw; height: 100vh; }
   .caption {
     position: fixed; left: 0; right: 0; bottom: 20px;
@@ -52,14 +52,71 @@
     return s;
   }
 
-  const NEBULA = ['118,168,255', '158,120,255', '86,200,238', '212,128,228', '120,220,200', '255,140,180'];
-  const STARLIGHT = ['255,240,215', '208,224,255', '255,204,158'];
+  /** A sprite laid down rotated and non-uniformly stretched: streaks and arcs. */
+  function blitR(sp, x, y, len, thick, cs, sn) {
+    ctx.setTransform(DPR * cs, DPR * sn, -DPR * sn, DPR * cs, DPR * x, DPR * y);
+    ctx.drawImage(sp, -len / 2, -thick / 2, len, thick);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
 
+  /** A sprite as an ellipse at an arbitrary position angle. */
+  function blitE(sp, x, y, rx, ry, cs, sn) {
+    ctx.setTransform(DPR * cs, DPR * sn, -DPR * sn, DPR * cs, DPR * x, DPR * y);
+    ctx.drawImage(sp, -rx, -ry, rx * 2, ry * 2);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+
+  /**
+   * Square texture, rotated to a position angle and optionally mirrored.
+   *
+   * Falling into a black hole, the disc texture ends up many screens across,
+   * and the cost of a blit is its area on the destination, not its source. So
+   * once it is large, the four corners of the screen are pushed back through
+   * the transform to find which part of the texture can actually be seen, and
+   * only that part is drawn.
+   */
+  function blitT(tex, x, y, ext, cs, sn, flip) {
+    let sx = 0, sy = 0, sw = TEX, sh = TEX, dx = -ext / 2, dy = -ext / 2, dw = ext, dh = ext;
+    if (ext > HALFDIAG * 1.5) {
+      let lx0 = Infinity, ly0 = Infinity, lx1 = -Infinity, ly1 = -Infinity;
+      for (let i = 0; i < 4; i++) {
+        const px = (i & 1 ? W : 0) - x, py = (i & 2 ? H : 0) - y;
+        const u = (px * cs + py * sn) * flip;
+        const v = -px * sn + py * cs;
+        if (u < lx0) lx0 = u;
+        if (u > lx1) lx1 = u;
+        if (v < ly0) ly0 = v;
+        if (v > ly1) ly1 = v;
+      }
+      const t0x = Math.max(0, Math.floor((lx0 / ext + 0.5) * TEX));
+      const t1x = Math.min(TEX, Math.ceil((lx1 / ext + 0.5) * TEX));
+      const t0y = Math.max(0, Math.floor((ly0 / ext + 0.5) * TEX));
+      const t1y = Math.min(TEX, Math.ceil((ly1 / ext + 0.5) * TEX));
+      if (t1x <= t0x || t1y <= t0y) return;
+      sx = t0x; sy = t0y; sw = t1x - t0x; sh = t1y - t0y;
+      dx = (t0x / TEX - 0.5) * ext;
+      dy = (t0y / TEX - 0.5) * ext;
+      dw = (sw / TEX) * ext;
+      dh = (sh / TEX) * ext;
+    }
+    ctx.setTransform(DPR * cs * flip, DPR * sn * flip, -DPR * sn, DPR * cs, DPR * x, DPR * y);
+    ctx.drawImage(tex, sx, sy, sw, sh, dx, dy, dw, dh);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+
+  // Colours a telescope would actually record. Old metal-rich stars in the
+  // bulge are warm; the arms are lit by short-lived O and B stars and run
+  // blue-white; the pink knots are HII regions glowing in hydrogen alpha.
+  const BULGE = ['255,214,158', '255,198,136', '250,224,186', '255,206,150'];
+  const ARM = ['176,206,255', '208,226,255', '146,186,252', '196,216,255'];
+  const HII = ['255,118,138', '255,146,150', '255,96,124'];
+  const FIELD = ['238,232,220', '224,222,238', '250,238,212'];
+  const STARLIGHT = ['255,240,215', '208,224,255', '255,204,158'];
   const PLANET = ['186,196,220', '214,172,138', '150,202,190', '204,164,186', '170,178,206'];
+  const DUST = '4,3,6';
 
   // Set while the camera is punching through a horizon: everything luminous
-  // stretches along the line of travel. `shell` is the opacity of the universe
-  // being left behind, which thins to nothing as the one inside takes over.
+  // stretches along the line of travel.
   let warp = 0;
   // True once the horizon being entered covers the whole screen. Everything the
   // universe outside it is made of is behind an opaque disc at that point, so
@@ -83,6 +140,192 @@
   const CHILD_FILL = 0.28;
   const MAX_LEVEL = 3;     // nesting kept live below the current root
 
+  // ------------------------------------------------- what a black hole is
+  // Around a black hole, light does not travel in straight lines, and drawing
+  // the result stamp by stamp every frame either beads up or costs the whole
+  // budget. But the shape only depends on the inclination of the disc, which
+  // never changes for a given hole — so it is worth rendering once, in fine
+  // detail, into a texture, and thereafter blitting.
+  //
+  // Three things are baked in, and together they are the difference between a
+  // black hole and a ring:
+  //
+  //   near half   the side of the disc between us and the hole, foreshortened
+  //               by the inclination and passing IN FRONT of the shadow
+  //   far half    bent up and over the top by the hole's own gravity, so
+  //               instead of vanishing behind the shadow it arcs above it
+  //   secondary   the underside of the far disc, wrapped the other way round
+  //               and squeezed into a thin bright crescent below the shadow
+  //
+  // Face-on those three collapse back into a single circle, which is right.
+  // Edge-on they open out into the shape everyone recognises.
+  //
+  // On top of that: the disc is far hotter and brighter inside than out, and
+  // the side rotating toward us is beamed by roughly the cube of its Doppler
+  // factor, which makes one half several times brighter than the other. That
+  // asymmetry is the strongest single cue that this is a physical object.
+  const QCI = [0.06, 0.22, 0.38, 0.54, 0.70, 0.86];  // quantised inclinations
+  const TEX = 1024;       // texture resolution
+  const TEXE = 4.9;       // half-extent of the texture, in shadow radii
+  const RIN = 1.32, ROUT = 4.55;
+  const texCache = new Map();
+
+  // Blue-white at the inner edge where the gas is hottest, out through white
+  // and amber to a dull red at the rim.
+  const RAMP = [
+    [0.00, 220, 238, 255],
+    [0.16, 255, 250, 236],
+    [0.40, 255, 226, 172],
+    [0.66, 255, 168, 92],
+    [1.00, 208, 86, 44],
+  ];
+  function ramp(t) {
+    let i = 1;
+    while (i < RAMP.length - 1 && t > RAMP[i][0]) i++;
+    const a = RAMP[i - 1], b = RAMP[i];
+    const u = (t - a[0]) / (b[0] - a[0]);
+    return ((a[1] + (b[1] - a[1]) * u) | 0) + ',' +
+           ((a[2] + (b[2] - a[2]) * u) | 0) + ',' +
+           ((a[3] + (b[3] - a[3]) * u) | 0);
+  }
+
+  function discTex(qi, pass) {
+    const key = qi + ':' + pass;
+    let c = texCache.get(key);
+    if (c) return c;
+    const ci = QCI[qi];
+    const sn = Math.sqrt(1 - ci * ci);
+    c = document.createElement('canvas');
+    c.width = c.height = TEX;
+    const g = c.getContext('2d');
+    const k = TEX / (2 * TEXE);
+    g.translate(TEX / 2, TEX / 2);
+    g.scale(k, k);           // from here on, one unit is one shadow radius
+    g.globalCompositeOperation = 'lighter';
+    g.lineCap = 'butt';
+
+    // Beaming, as a gradient across the ring rather than as a chain of
+    // segments. On a ring of radius rho the line-of-sight velocity goes as
+    // cos(azimuth), and cos(azimuth) is exactly x/rho — so a single horizontal
+    // gradient encodes the Doppler boost precisely, and the ring can be stroked
+    // in one piece with no seams anywhere along it.
+    const beamed = (rx, col, peak) => {
+      const grd = g.createLinearGradient(-rx, 0, rx, 0);
+      for (let i = 0; i <= 10; i++) {
+        const u = -1 + (2 * i) / 10;
+        const d = 1 + 0.42 * sn * u;
+        const a = peak * d * d * d;
+        grd.addColorStop(i / 10, 'rgba(' + col + ',' + Math.min(1, a).toFixed(4) + ')');
+      }
+      return grd;
+    };
+
+    // Bloom, in the plane of the disc. Light this bright spills in any real
+    // optic; without it the disc looks pasted on.
+    if (pass === 0) {
+      g.save();
+      g.scale(1, 0.3 + 0.7 * ci);
+      const bg = g.createRadialGradient(0, 0, 0, 0, 0, TEXE);
+      bg.addColorStop(0, 'rgba(255,204,148,0.08)');
+      bg.addColorStop(0.16, 'rgba(255,156,84,0.03)');
+      bg.addColorStop(0.5, 'rgba(255,110,50,0)');
+      g.fillStyle = bg;
+      g.fillRect(-TEXE, -TEXE, TEXE * 2, TEXE * 2);
+      g.restore();
+    }
+
+    // Many thin rings, each much wider than the step between them. Strokes have
+    // hard edges, so a stack of them only looks like a smooth surface if any one
+    // of them contributes a small fraction of the total; at low overlap the
+    // plateaus show up as concentric ribbing.
+    const NR = 260, OVER = 7;
+    const rhoAt = (t) => RIN + (ROUT - RIN) * Math.pow(t, 1.35);
+    for (let i = 0; i < NR; i++) {
+      const t = (i + 0.5) / NR;
+      const rho = rhoAt(t);
+      const gap = Math.max(0.004, rhoAt((i + 1.5) / NR) - rho);
+      const col = ramp(t);
+      // Flux falls off steeply outward, so nearly all the light comes from the
+      // last little way in. A disc of even brightness reads as a painted ring.
+      const flux = Math.pow(RIN / rho, 2.7);
+      // A real disc flares: thicker and softer further out. Widening the stroke
+      // without thinning it would just pile up more light, so the two cancel.
+      const flare = 1 + t * 1.0;
+      const lw = Math.max(0.02, gap * OVER * flare);
+      const peak = (flux / flare) * (0.17 * 2.4 / OVER) * (pass === 0 ? 1.25 : 1);
+
+      if (pass === 1) {
+        // Near half: foreshortened by the inclination, passing in front.
+        g.strokeStyle = beamed(rho, col, peak);
+        g.lineWidth = lw;
+        g.beginPath();
+        g.ellipse(0, 0, rho, Math.max(rho * ci, 0.012), 0, -0.04, Math.PI + 0.04);
+        g.stroke();
+        continue;
+      }
+
+      // Far half, bent up and over the top. The floor keeps the lensed image
+      // clear of the shadow: light passing inside the photon sphere never
+      // reaches us at all.
+      g.strokeStyle = beamed(rho, col, peak);
+      g.lineWidth = lw;
+      g.beginPath();
+      g.ellipse(0, 0, rho, Math.max(rho * (0.52 + 0.48 * ci), 1.12), 0, Math.PI - 0.04, TAU + 0.04);
+      g.stroke();
+
+      // The secondary image: the underside of the far disc, wrapped the other
+      // way round and squeezed into a crescent below the shadow. Traced across
+      // the lower half; the beaming is unchanged, because it goes as the cosine
+      // of the azimuth and cosine does not care which way the arc was drawn.
+      // It is an edge-on effect: seen from above there is nothing to wrap
+      // round, and the second image merges into the photon ring.
+      if (t < 0.6 && sn > 0.2) {
+        const r2 = 1.16 + (rho - RIN) * 0.22;
+        g.strokeStyle = beamed(r2, col, peak * 0.55 * sn);
+        g.lineWidth = lw * 0.6;
+        g.beginPath();
+        g.ellipse(0, 0, r2, Math.max(r2 * 0.32, 1.09), 0, -0.04, Math.PI + 0.04);
+        g.stroke();
+      }
+    }
+
+    // Striations. Accretion discs are turbulent sheets, not enamel — but the
+    // unevenness has to be irregular, because anything periodic reads as banding.
+    let seed = 1234 + qi * 77 + pass * 13;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+    for (let i = 0; i < 260; i++) {
+      const t = Math.pow(rnd(), 1.6);
+      const rho = rhoAt(t);
+      const col = ramp(t);
+      const f0 = (pass === 1 ? 0 : Math.PI) + rnd() * (Math.PI * 0.8);
+      const ry = pass === 1 ? Math.max(rho * ci, 0.012)
+                            : Math.max(rho * (0.52 + 0.48 * ci), 1.12);
+      const a = Math.pow(RIN / rho, 2.7) * 0.1 * rnd();
+      if (a < 0.004) continue;
+      g.strokeStyle = 'rgba(' + col + ',' + a.toFixed(4) + ')';
+      g.lineWidth = 0.012 + rnd() * 0.06;
+      g.beginPath();
+      g.ellipse(0, 0, rho, ry, 0, f0, f0 + 0.2 + rnd() * 0.8);
+      g.stroke();
+    }
+
+    // The photon ring: light that went round the hole one or more times before
+    // getting out. It really is a circle — but it is made of beamed light that
+    // is many times brighter on one side than the other, so it reads as light
+    // rather than as trim.
+    if (pass === 0) {
+      g.strokeStyle = beamed(1.08, '255,238,208', 0.22);
+      g.lineWidth = 0.3;
+      g.beginPath(); g.ellipse(0, 0, 1.08, 1.08, 0, 0, TAU); g.stroke();
+      g.strokeStyle = beamed(1.046, '255,250,238', 1.15);
+      g.lineWidth = 0.042;
+      g.beginPath(); g.ellipse(0, 0, 1.046, 1.046, 0, 0, TAU); g.stroke();
+    }
+
+    texCache.set(key, c);
+    return c;
+  }
+
   // ------------------------------------------------------------------ scene
   // Nothing here is solved from forces. Motes ride fixed circular orbits with
   // differential rotation, which winds loose spiral arms on its own and stays
@@ -96,57 +339,113 @@
 
   class Universe {
     constructor() {
-      this.tint = pick(NEBULA);
+      // Nothing in the sky is presented face-on to us. A random tilt and a
+      // random angle on the sky turn every circle in the scene into an ellipse,
+      // which is most of the difference between a diagram and a photograph.
+      this.ci = rand(0.28, 0.9);          // cosine of the disc's inclination
+      const pa = Math.random() * TAU;     // position angle on the sky
+      this.cp = Math.cos(pa);
+      this.sp = Math.sin(pa);
       this.spin = Math.random() < 0.5 ? 1 : -1;
       this.age = 0;
       this.born = 0;
       this.motes = [];
+      this.haze = [];
+      this.dust = [];
       this.stars = [];
       this.holes = [];
-      this.rings = [];
+      this.blasts = [];
       this.starTimer = rand(0.5, 1.8);
+
+      const arms = 2 + ((Math.random() * 2) | 0);
+      const swirl = rand(2.2, 3.4);
+      const armCol = pick(ARM), bulgeCol = pick(BULGE);
 
       // Three populations. Arms alone leave voids between them and read as a
       // bare pinwheel, so they sit on a smooth field with a bulge in the middle.
-      const arms = 2 + ((Math.random() * 2) | 0);
-      const swirl = rand(2.2, 3.4);
-      for (let i = 0; i < 1400; i++) {
+      // `flat` is how completely a population lies in the disc plane: the bulge
+      // is a rounded ellipsoid and must not foreshorten into a pancake.
+      for (let i = 0; i < 3000; i++) {
         const roll = Math.random();
-        let rad, a, size, col, bright;
-        if (roll < 0.16) {
+        let rad, a, size, col, bright, flat;
+        if (roll < 0.15) {
           rad = 0.03 + Math.pow(Math.random(), 1.7) * 0.3;
           a = Math.random() * TAU;
-          size = rand(0.4, 1.6);
-          col = Math.random() < 0.55 ? pick(STARLIGHT) : this.tint;
-          bright = rand(0.3, 0.9);
-        } else if (roll < 0.66) {
+          size = rand(0.4, 1.5);
+          col = Math.random() < 0.5 ? bulgeCol : pick(BULGE);
+          bright = rand(0.32, 0.95);
+          flat = 0.25;
+        } else if (roll < 0.57) {
           rad = 0.09 + Math.pow(Math.random(), 0.55) * 0.92;
-          a = (((Math.random() * arms) | 0) * TAU) / arms + rad * swirl + rand(-0.3, 0.3);
-          size = rand(0.7, 2.6);
-          col = Math.random() < 0.24 ? pick(STARLIGHT) : this.tint;
-          bright = rand(0.4, 1);
+          // Arms are wide, ragged lanes of star formation, not wires. A narrow
+          // spread turns them into beads on a string.
+          a = (((Math.random() * arms) | 0) * TAU) / arms + rad * swirl
+            + rand(-0.5, 0.5) * (0.5 + 0.5 / (0.4 + rad));
+          size = rand(0.7, 2.4);
+          // Star formation is clumped along the arms, so the pink hydrogen
+          // knots go here and nowhere else.
+          col = Math.random() < 0.1 ? pick(HII) : Math.random() < 0.7 ? armCol : pick(ARM);
+          bright = rand(0.45, 1.05);
+          flat = 1;
         } else {
           rad = 0.08 + Math.pow(Math.random(), 0.7) * 0.95;
           a = Math.random() * TAU;
-          size = rand(0.5, 1.8);
-          col = Math.random() < 0.16 ? pick(STARLIGHT) : this.tint;
-          bright = rand(0.28, 0.72);
+          size = rand(0.45, 1.7);
+          col = pick(FIELD);
+          bright = rand(0.26, 0.66);
+          flat = 0.92;
         }
         this.motes.push({
           rad, a, size, col, bright,
+          cz: 1 - flat * (1 - this.ci),
           w: ROT(rad) * this.spin,
           tw: rand(0, TAU),
           tws: rand(1.1, 3.2),
         });
       }
 
+      // Unresolved light. A galaxy is not a scatter of separate points — most
+      // of what you see is the blur of stars too faint and too many to pick
+      // out. Without this layer the arms read as glitter on black.
+      for (let i = 0; i < 64; i++) {
+        const onArm = Math.random() < 0.62;
+        const rad = onArm
+          ? 0.1 + Math.pow(Math.random(), 0.6) * 0.9
+          : 0.04 + Math.pow(Math.random(), 0.85) * 0.95;
+        const a = onArm
+          ? (((Math.random() * arms) | 0) * TAU) / arms + rad * swirl + rand(-0.34, 0.34)
+          : Math.random() * TAU;
+        this.haze.push({
+          rad, a,
+          size: rand(0.07, 0.2) * (onArm ? 1 : 1.3),
+          col: onArm ? armCol : (rad < 0.25 ? bulgeCol : pick(FIELD)),
+          alpha: rand(0.05, 0.13) * (onArm ? 1.15 : 0.8),
+          w: ROT(rad) * this.spin,
+        });
+      }
+
+      // Dust. Everything else in this scene adds light; dust is the only thing
+      // that takes it away, and without something opaque in front of the glow
+      // the whole picture stays translucent and drawn. Real lanes sit on the
+      // inner edge of the arms, which is where these go.
+      for (let i = 0; i < 280; i++) {
+        const nuclear = Math.random() < 0.13;
+        const rad = nuclear ? rand(0.05, 0.2) : 0.12 + Math.pow(Math.random(), 0.75) * 0.8;
+        const a = nuclear
+          ? Math.random() * TAU
+          : (((Math.random() * arms) | 0) * TAU) / arms + rad * swirl - rand(0.08, 0.26);
+        this.dust.push({
+          rad, a,
+          size: rand(0.03, 0.095) * (nuclear ? 0.6 : 1),
+          alpha: rand(0.22, 0.72),
+          w: ROT(rad) * this.spin,
+        });
+      }
+
       // The nucleus. Every galaxy has one, it is there from the beginning, and
       // under the theory it is a universe like any other — but it is ONE, and
       // the disc will go on making millions of the small ones.
-      this.holes.push({
-        rad: 0, a: 0, w: 0, size: 1, core: true,
-        open: 1, flash: 0, spin: rand(0, TAU), child: null, planets: null,
-      });
+      this.holes.push(this._hole(0, 0, 0, true));
 
       // Stars whipping round the nucleus on near-Keplerian orbits, the way the
       // S-cluster does around Sgr A*. Fast enough to visibly precess.
@@ -159,11 +458,33 @@
           size: rand(0.5, 1.5),
           col: pick(STARLIGHT),
           bright: rand(0.45, 1),
+          cz: 1 - 0.3 * (1 - this.ci),
           w: (0.021 / Math.pow(rad, 1.5)) * this.spin,
           tw: rand(0, TAU),
           tws: rand(1.4, 3.6),
         });
       }
+    }
+
+    /**
+     * A black hole. Its spin axis has nothing to do with the galaxy's, so the
+     * accretion disc gets its own tilt and its own sense of rotation.
+     */
+    _hole(rad, a, w, core) {
+      const pa = Math.random() * TAU;
+      const qi = (Math.random() * QCI.length) | 0;
+      return {
+        rad, a, w, core,
+        size: 1,
+        open: core ? 1 : 0,
+        qi, ci: QCI[qi],
+        cp: Math.cos(pa), sp: Math.sin(pa),
+        dir: Math.random() < 0.5 ? 1 : -1,
+        feed: core ? 0.85 : 1.6,
+        spin: rand(0, TAU),
+        child: null,
+        sys: null,
+      };
     }
 
     /** Kick things off mid-story so a fresh universe is never dull. */
@@ -182,12 +503,17 @@
       // A handful of worlds, which is the whole point: they keep these orbits
       // after the star dies, and an orbit around nothing is unmistakably a
       // black hole rather than a hole cut in the picture.
-      const planets = [];
+      const spa = Math.random() * TAU;
+      const sys = {
+        list: [],
+        ci: rand(0.08, 0.95),
+        cp: Math.cos(spa), sp: Math.sin(spa),
+      };
       const np = 2 + ((Math.random() * 3) | 0);
       let pr = 0.04;
       for (let i = 0; i < np; i++) {
         pr += rand(0.016, 0.03);
-        planets.push({
+        sys.list.push({
           r: pr,
           a: Math.random() * TAU,
           w: (1.1 / Math.pow(pr / 0.05, 1.5)) * this.spin,
@@ -196,7 +522,7 @@
         });
       }
       this.stars.push({
-        planets,
+        sys,
         rad,
         a: Math.random() * TAU,
         w: ROT(rad) * this.spin,
@@ -210,6 +536,26 @@
       });
     }
 
+    /** A supernova: ragged ejecta, not an expanding outline. */
+    _blast(rad, a, power) {
+      const parts = [];
+      const n = (22 + Math.random() * 16 * power) | 0;
+      for (let i = 0; i < n; i++) {
+        parts.push({
+          ang: Math.random() * TAU,
+          // A wide spread of speeds is what makes the shell look torn rather
+          // than drawn; one speed for all of them is a circle again.
+          spd: rand(0.012, 0.075) * power * rand(0.45, 1.35),
+          size: rand(0.6, 2.4),
+          hot: Math.random() < 0.18,   // oxygen knots among the hydrogen
+        });
+      }
+      this.blasts.push({
+        u: Math.cos(a) * rad, v: Math.sin(a) * rad,
+        t: 0, life: 2.4 + power, power, parts,
+      });
+    }
+
     update(dt, level) {
       this.age += dt;
       if (this.born < 1) this.born = Math.min(1, this.born + dt * 0.7);
@@ -219,6 +565,8 @@
         m.a += m.w * dt;
         m.tw += m.tws * dt;
       }
+      for (let i = 0; i < this.haze.length; i++) this.haze[i].a += this.haze[i].w * dt;
+      for (let i = 0; i < this.dust.length; i++) this.dust[i].a += this.dust[i].w * dt;
 
       this.starTimer -= dt;
       if (this.starTimer <= 0 && this.stars.length < 4) {
@@ -230,29 +578,31 @@
         const s = this.stars[i];
         s.t += dt;
         s.a += s.w * dt;
-        for (const q of s.planets) q.a += q.w * dt;
+        for (const q of s.sys.list) q.a += q.w * dt;
         if (s.t < s.life) continue;
         this.stars.splice(i, 1);
         if (s.doomed && this.holes.length < 4) {
           // The remnant keeps its progenitor's orbit exactly. It is the same
           // object, minus the light.
-          this.holes.push({
-            rad: s.rad, a: s.a, w: s.w, size: 1, core: false,
-            open: 0, flash: 1, spin: 0, child: null, planets: s.planets,
-          });
-          this.rings.push({ rad: s.rad, a: s.a, t: 0, life: 1.6, col: '255,224,188', big: 1 });
+          const h = this._hole(s.rad, s.a, s.w, false);
+          h.sys = s.sys;
+          this.holes.push(h);
+          this._blast(s.rad, s.a, 1.6);
         } else {
-          this.rings.push({ rad: s.rad, a: s.a, t: 0, life: 1.2, col: s.col, big: 0.45 });
+          this._blast(s.rad, s.a, 0.7);
         }
       }
 
       for (let i = 0; i < this.holes.length; i++) {
         const h = this.holes[i];
         h.open = Math.min(1, h.open + dt * 0.55);
-        h.flash = Math.max(0, h.flash - dt * 1.5);
         h.spin += dt * 1.7;
         h.a += h.w * dt;
-        if (h.planets) for (const q of h.planets) q.a += q.w * dt;
+        if (h.sys) for (const q of h.sys.list) q.a += q.w * dt;
+        // A stellar remnant is briefly very bright — it is swallowing the
+        // fallback of its own progenitor — and then settles to almost nothing,
+        // because most black holes are not eating anything at all.
+        if (!h.core) h.feed += (0.28 - h.feed) * Math.min(1, dt * 0.16);
         // A seed, then accretion and mergers. Whatever the seed channel turns
         // out to be, the nucleus is not born at the mass we observe it at.
         if (h.core) h.size += (CORE_R - h.size) * Math.min(1, dt * 0.13);
@@ -265,10 +615,10 @@
         if (h.child && level < MAX_LEVEL) h.child.update(dt, level + 1);
       }
 
-      for (let i = this.rings.length - 1; i >= 0; i--) {
-        const r = this.rings[i];
-        r.t += dt;
-        if (r.t > r.life) this.rings.splice(i, 1);
+      for (let i = this.blasts.length - 1; i >= 0; i--) {
+        const b = this.blasts[i];
+        b.t += dt;
+        if (b.t > b.life) this.blasts.splice(i, 1);
       }
     }
 
@@ -282,7 +632,7 @@
       // like it is expanding everywhere at once.
       const RD = R * (0.14 + 0.86 * ease(this.born));
       if (alpha <= 0.02 || R < 1.5) return;
-      // Everything this universe contains, holes and their glow included, fits
+      // Everything this universe contains, holes and their discs included, fits
       // inside 1.6R of its centre, so if that box misses the screen, all of it
       // does. (This used to bail only for small R, which meant a universe zoomed
       // to thirty thousand pixels across drew its every hole from off screen.)
@@ -293,20 +643,19 @@
       // entered is the opaque disc doing the covering.
       const own = alpha;
       const lit = !(level === 0 && occlude);
+      const CP = this.cp, SP = this.sp;
 
       ctx.globalCompositeOperation = 'lighter';
 
-      // Bubble haze, plus a tighter nucleus. Both fade off once the disc is
-      // larger than the screen — otherwise standing inside a universe means
-      // standing inside a flat wash of its own tint.
+      // The bulge: a real ellipsoid of old stars, projected. Not a wash of
+      // colour over the whole frame — that was the strongest tell of all.
       const wide = 1 / (1 + (R / HALFDIAG) * (R / HALFDIAG));
       if (lit && own * wide > 0.03 && warp < 0.3) {
-        // Skipped outright once faint: these are the two largest blits in the
-        // frame, and scaling a sprite to several screen-widths is not free.
-        ctx.globalAlpha = own * 0.5 * wide;
-        ctx.drawImage(glow(this.tint, 128, 0, 1.6), cx - R * 1.5, cy - R * 1.5, R * 3, R * 3);
-        ctx.globalAlpha = own * 0.34 * wide;
-        ctx.drawImage(glow(this.tint, 128, 0, 2.8), cx - R * 0.55, cy - R * 0.55, R * 1.1, R * 1.1);
+        const bc = 1 - 0.32 * (1 - this.ci);
+        ctx.globalAlpha = own * 0.2 * wide;
+        blitE(glow('255,206,150', 128, 0, 2.6), cx, cy, R * 0.3, R * 0.3 * bc, CP, SP);
+        ctx.globalAlpha = own * 0.16 * wide;
+        blitE(glow('255,236,204', 128, 0.03, 3.4), cx, cy, R * 0.1, R * 0.1 * bc, CP, SP);
       }
 
       // The bounce, seen from inside: the whole of space alight at once, not a
@@ -314,16 +663,36 @@
       if (lit && this.born < 1) {
         const f = 1 - this.born;
         ctx.globalAlpha = own * f * f * 0.85;
-        ctx.drawImage(glow('236,240,255', 128, 0.35, 1.4), cx - R * 1.2, cy - R * 1.2, R * 2.4, R * 2.4);
+        blitE(glow('236,240,255', 128, 0.35, 1.4), cx, cy, R * 1.2, R * 1.2, 1, 0);
       }
+
+      // The unresolved sheen the arms are made of.
+      if (lit && warp < 0.3 && own * wide > 0.02) {
+        const hsprite = glow('255,255,255', 128, 0, 2.0);
+        for (let i = 0; i < this.haze.length; i++) {
+          const z = this.haze[i];
+          const u = Math.cos(z.a) * z.rad, v = Math.sin(z.a) * z.rad * this.ci;
+          const px = cx + (u * CP - v * SP) * RD;
+          const py = cy + (u * SP + v * CP) * RD;
+          const rx = z.size * R * 1.5, ry = z.size * R * (0.35 + 0.65 * this.ci);
+          // Once one of these is larger than the screen it is a flat wash and
+          // nothing else, and it costs a full-frame blend to say so.
+          if (rx > HALFDIAG * 1.5) continue;
+          if (px + rx < 0 || px - rx > W || py + rx < 0 || py - rx > H) continue;
+          ctx.globalAlpha = own * z.alpha * wide;
+          blitE(glow(z.col, 128, 0, 2.0), px, py, rx, ry, CP, SP);
+        }
+        void hsprite;
+      }
+
+      const unit = R / 320;
 
       // Motes. Skipped wholesale once this universe has faded past seeing; its
       // holes below still run, because the destination is inside one of them.
-      const unit = R / 320;
       if (lit) {
       // Level of detail by on-screen size, not by nesting depth: a disc only a
       // hundred pixels across does not need every mote resolved.
-      let step = R > 150 ? 1 : R > 60 ? 2 : 3;
+      let step = R > 190 ? 1 : R > 70 ? 2 : 3;
       // A streak covers many times the area of a point, so at speed the same
       // frame budget buys far fewer of them. Thinning them out alone would just
       // look like a dimming, so the survivors carry the missing light.
@@ -332,44 +701,100 @@
       step *= dec;
       for (let i = 0; i < this.motes.length; i += step) {
         const m = this.motes[i];
-        const px = cx + Math.cos(m.a) * m.rad * RD;
-        const py = cy + Math.sin(m.a) * m.rad * RD;
+        const u = Math.cos(m.a) * m.rad, v = Math.sin(m.a) * m.rad * m.cz;
+        const px = cx + (u * CP - v * SP) * RD;
+        const py = cy + (u * SP + v * CP) * RD;
         if (px < -30 || px > W + 30 || py < -30 || py > H + 30) continue;
         const tw = 0.72 + 0.28 * Math.sin(m.tw);
-        const s = m.size * tw * unit * 7.5;
-        if (s < 0.7 || s > 420) continue;
-        // Close up a mote is a screen-sized smear that adds fog and costs a
-        // full-frame blend, so dim it as it swells and drop it once it is huge.
-        let a = own * m.bright * tw * 0.62 * relight;
-        if (s > 150) a *= 150 / s;
+        const s = m.size * tw * unit * 5.6;
+        if (s < 0.7 || s > 300) continue;
+        let a = own * m.bright * tw * 0.72 * relight;
         if (a < 0.02) continue;
-        ctx.globalAlpha = a;
-        if (warp <= 0.001) {
-          ctx.drawImage(glow(m.col), px - s / 2, py - s / 2, s, s);
+        if (warp > 0.001) {
+          // Drawn out along the line of travel. Things off to the side sweep
+          // past faster than things dead ahead, so they stretch further — which
+          // is what sells it as speed rather than a blur filter.
+          const dx = px - W / 2, dy = py - H / 2;
+          const d = Math.hypot(dx, dy) || 1;
+          const len = Math.min(230, s * (1 + warp * warp * 15 * (0.2 + d / HALFDIAG)));
+          ctx.globalAlpha = s > 150 ? a * 150 / s : a;
+          blitR(glow(m.col), px, py, len, s, dx / d, dy / d);
           continue;
         }
-        // Drawn out along the line of travel. Things off to the side sweep past
-        // faster than things dead ahead, so they stretch further — which is what
-        // sells it as speed rather than a blur filter.
-        const dx = px - W / 2, dy = py - H / 2;
-        const d = Math.hypot(dx, dy) || 1;
-        const len = Math.min(230, s * (1 + warp * warp * 15 * (0.2 + d / HALFDIAG)));
-        ctx.setTransform(DPR * (dx / d), DPR * (dy / d), -DPR * (dy / d), DPR * (dx / d), DPR * px, DPR * py);
-        ctx.drawImage(glow(m.col), -len / 2, -s / 2, len, s);
-        ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+        if (s > 13) {
+          // Close up a star does not become a soft disc the size of a house; it
+          // stays a point with a halo around it. Drawing it as one big blurred
+          // sprite is what turned the whole field into bokeh.
+          ctx.globalAlpha = a * 0.15;
+          ctx.drawImage(glow(m.col, 64, 0, 3.4), px - s / 2, py - s / 2, s, s);
+          const cs = 13;
+          ctx.globalAlpha = Math.min(1, a * 1.35);
+          ctx.drawImage(glow(m.col, 32, 0.24, 2.6), px - cs / 2, py - cs / 2, cs, cs);
+        } else {
+          ctx.globalAlpha = a;
+          ctx.drawImage(glow(m.col), px - s / 2, py - s / 2, s, s);
+        }
       }
       }
 
-      // Shockwaves. Arc strokes are not cheap and nothing reads at speed.
-      if (lit && warp < 0.3) for (let i = 0; i < this.rings.length; i++) {
-        const r = this.rings[i];
-        const k = r.t / r.life;
-        ctx.globalAlpha = own * (1 - k) * 0.7;
-        ctx.strokeStyle = 'rgba(' + r.col + ',1)';
-        ctx.lineWidth = Math.max(0.5, (1 - k) * 3 * unit);
-        ctx.beginPath();
-        ctx.arc(cx + Math.cos(r.a) * r.rad * RD, cy + Math.sin(r.a) * r.rad * RD, k * r.big * R * 0.42, 0, TAU);
-        ctx.stroke();
+      // Dust, in front of everything it crosses. The only subtractive thing in
+      // the frame, and the reason the arms read as material rather than paint.
+      if (lit && warp < 0.35 && R > 40) {
+        ctx.globalCompositeOperation = 'source-over';
+        const dsprite = glow(DUST, 64, 0.08, 1.7);
+        const dstep = R > 280 ? 1 : 2;
+        for (let i = 0; i < this.dust.length; i += dstep) {
+          const d = this.dust[i];
+          const u = Math.cos(d.a) * d.rad, v = Math.sin(d.a) * d.rad * this.ci;
+          const px = cx + (u * CP - v * SP) * RD;
+          const py = cy + (u * SP + v * CP) * RD;
+          const s = d.size * R;
+          if (s > HALFDIAG * 1.2) continue;
+          if (px + s * 2 < 0 || px - s * 2 > W || py + s * 2 < 0 || py - s * 2 > H) continue;
+          // Drawn out along the lane's own direction of travel. Orienting them
+          // all to the same angle instead turns the lanes into parallel
+          // scratches across the picture.
+          const tu = -Math.sin(d.a) * d.rad, tv = Math.cos(d.a) * d.rad * this.ci;
+          const tx = tu * CP - tv * SP, ty = tu * SP + tv * CP;
+          const td = Math.hypot(tx, ty) || 1;
+          ctx.globalAlpha = own * d.alpha;
+          blitE(dsprite, px, py, s * 1.7, s * 0.62, tx / td, ty / td);
+        }
+        ctx.globalCompositeOperation = 'lighter';
+      }
+
+      // Supernovae: torn shells of ejecta with the shock still lit inside them.
+      if (lit && warp < 0.4) for (let i = 0; i < this.blasts.length; i++) {
+        const b = this.blasts[i];
+        const k = b.t / b.life;
+        const fade = 1 - k;
+        // Shock breakout — a genuine flash, over in a fraction of a second.
+        if (b.t < 0.5) {
+          const f = 1 - b.t / 0.5;
+          const v0 = b.v * this.ci;
+          const px = cx + (b.u * CP - v0 * SP) * RD;
+          const py = cy + (b.u * SP + v0 * CP) * RD;
+          const fs = unit * 40 * b.power * (1 + (1 - f) * 2.5);
+          ctx.globalAlpha = own * f * f * 0.9;
+          ctx.drawImage(glow('255,246,226', 128, 0.06, 2.2), px - fs, py - fs, fs * 2, fs * 2);
+        }
+        if (fade <= 0) continue;
+        const spread = 1 - Math.exp(-b.t * 1.5);
+        const col = k < 0.25 ? '255,238,214' : k < 0.55 ? '255,172,96' : '226,88,64';
+        const hotcol = k < 0.45 ? '176,232,255' : '120,190,210';
+        for (let j = 0; j < b.parts.length; j++) {
+          const p = b.parts[j];
+          const dd = p.spd * spread;
+          const u = b.u + Math.cos(p.ang) * dd;
+          const v = (b.v + Math.sin(p.ang) * dd) * this.ci;
+          const px = cx + (u * CP - v * SP) * RD;
+          const py = cy + (u * SP + v * CP) * RD;
+          if (px < -20 || px > W + 20 || py < -20 || py > H + 20) continue;
+          const s = p.size * unit * 9 * (1 + spread * 1.6);
+          if (s < 0.6) continue;
+          ctx.globalAlpha = own * fade * fade * 0.6;
+          ctx.drawImage(glow(p.hot ? hotcol : col, 64, 0.05, 2.4), px - s / 2, py - s / 2, s, s);
+        }
       }
 
       // Stars: swell, redden, tremble, and — if they are heavy enough — fall in
@@ -378,9 +803,10 @@
       if (lit) for (let i = 0; i < this.stars.length; i++) {
         const s = this.stars[i];
         const k = s.t / s.life;
-        const px = cx + Math.cos(s.a) * s.rad * RD;
-        const py = cy + Math.sin(s.a) * s.rad * RD;
-        this._drawSystem(px, py, s.planets, R, own, false);
+        const u = Math.cos(s.a) * s.rad, v = Math.sin(s.a) * s.rad * this.ci;
+        const px = cx + (u * CP - v * SP) * RD;
+        const py = cy + (u * SP + v * CP) * RD;
+        this._drawSystem(px, py, s.sys, R, own, 1);
 
         let swell = 1 + k * k * k * 2.2;
         let core = 0.32;
@@ -393,24 +819,25 @@
         }
         const size = s.size * swell * unit * 13;
         if (size < 0.8) continue;
-        ctx.globalAlpha = own * 0.85;
-        ctx.drawImage(glow(k > 0.75 && s.doomed ? '255,166,118' : s.col, 64, 0.07, 2.4),
+        ctx.globalAlpha = own * 0.7;
+        ctx.drawImage(glow(k > 0.75 && s.doomed ? '255,166,118' : s.col, 64, 0.07, 3.0),
           px - size / 2, py - size / 2, size, size);
-        const cs = size * core;
+        const cs = Math.min(size * core, 26);
         ctx.globalAlpha = own;
         ctx.drawImage(glow('255,255,255', 32, 0.32, 2), px - cs / 2, py - cs / 2, cs, cs);
         if (s.doomed && k > 0.82) {
           const t = (k - 0.82) / 0.18;
-          ctx.globalAlpha = own * t * (0.5 + 0.5 * Math.sin(s.t * 34));
+          ctx.globalAlpha = own * t * (0.5 + 0.5 * Math.sin(s.t * 34)) * 0.7;
           const ws = size * 2.3 * (fall > 0 ? 1 + fall * 3 : 1);
-          ctx.drawImage(glow('255,138,88', 64, 0.02, 2), px - ws / 2, py - ws / 2, ws, ws);
+          ctx.drawImage(glow('255,138,88', 64, 0.02, 2.6), px - ws / 2, py - ws / 2, ws, ws);
         }
       }
 
       // Singularities, each with its cosmos inside.
       for (let i = 0; i < this.holes.length; i++) {
         const h = this.holes[i];
-        this._drawHole(cx + Math.cos(h.a) * h.rad * RD, cy + Math.sin(h.a) * h.rad * RD,
+        const u = Math.cos(h.a) * h.rad, v = Math.sin(h.a) * h.rad * this.ci;
+        this._drawHole(cx + (u * CP - v * SP) * RD, cy + (u * SP + v * CP) * RD,
           Math.max(1.2, R * HOLE_R * h.size * h.open), h, own, alpha, level);
       }
 
@@ -418,68 +845,74 @@
       ctx.globalCompositeOperation = 'source-over';
     }
 
-    /** Worlds on their orbits — the same ones before and after the collapse. */
-    _drawSystem(x, y, planets, R, alpha, orbits) {
-      if (!planets) return;
-      const first = planets[0].r * R;
+    /**
+     * Worlds on their orbits — the same ones before and after the collapse. The
+     * orbit is shown by the trail the world leaves along it, never by a drawn
+     * ring: a stroked circle is the most artificial mark you can put on screen.
+     */
+    _drawSystem(x, y, sys, R, alpha, dim) {
+      if (!sys) return;
+      const first = sys.list[0].r * R;
       if (first < 3) return;
-      if (orbits && first > 26 && warp < 0.2) {
-        // Only once the system is big enough to read. Any earlier and it is a
-        // scribble; this way the orbits resolve as you fall toward them.
-        ctx.globalCompositeOperation = 'lighter';
-        ctx.globalAlpha = alpha * Math.min(0.16, (first - 26) / 400);
-        ctx.strokeStyle = 'rgba(190,205,235,1)';
-        ctx.lineWidth = Math.max(0.5, R * 0.0009);
-        for (const q of planets) {
-          ctx.beginPath();
-          ctx.arc(x, y, q.r * R, 0, TAU);
-          ctx.stroke();
-        }
-      }
+      const cp = sys.cp, sp = sys.sp, ci = sys.ci;
       ctx.globalCompositeOperation = 'lighter';
-      for (const q of planets) {
+      const trail = first > 26 && warp < 0.2;
+      for (let i = 0; i < sys.list.length; i++) {
+        const q = sys.list[i];
         // Capped: a world seen from close up is a small hard disc, not a cloud.
         // Without the clamp they swell into blobs the size of the star they lost.
-        const s = Math.min(22, q.size * (R / 320) * 5.5);
+        const s = Math.min(20, q.size * (R / 320) * 5.5);
         if (s < 0.6) continue;
-        const px = x + Math.cos(q.a) * q.r * R;
-        const py = y + Math.sin(q.a) * q.r * R;
+        if (trail) {
+          const tsprite = glow(q.col, 32, 0, 2.4);
+          const dirn = q.w < 0 ? -1 : 1;
+          for (let j = 1; j <= 5; j++) {
+            const ta = q.a - j * 0.13 * dirn;
+            const u = Math.cos(ta) * q.r, v = Math.sin(ta) * q.r * ci;
+            const px = x + (u * cp - v * sp) * R;
+            const py = y + (u * sp + v * cp) * R;
+            ctx.globalAlpha = alpha * dim * 0.12 * (1 - j / 6);
+            const ts = s * (1 - j * 0.12);
+            ctx.drawImage(tsprite, px - ts, py - ts, ts * 2, ts * 2);
+          }
+        }
+        const u = Math.cos(q.a) * q.r, v = Math.sin(q.a) * q.r * ci;
+        const px = x + (u * cp - v * sp) * R;
+        const py = y + (u * sp + v * cp) * R;
         if (px < -20 || px > W + 20 || py < -20 || py > H + 20) continue;
-        ctx.globalAlpha = alpha * 0.55;
-        ctx.drawImage(glow(q.col, 32, 0.1, 2.4), px - s, py - s, s * 2, s * 2);
-        ctx.globalAlpha = alpha;
+        ctx.globalAlpha = alpha * dim * 0.45;
+        ctx.drawImage(glow(q.col, 32, 0.1, 2.8), px - s, py - s, s * 2, s * 2);
+        ctx.globalAlpha = alpha * dim;
         ctx.drawImage(glow(q.col, 32, 0.62, 2.6), px - s / 2, py - s / 2, s, s);
       }
     }
 
     _drawHole(x, y, hr, h, alpha, kidAlpha, level) {
-      // hr * 8 is the outer reach of the lensing glow. Beyond that there is
-      // nothing to draw, at any size.
-      if (x + hr * 8 < 0 || x - hr * 8 > W || y + hr * 8 < 0 || y - hr * 8 > H) return;
+      // TEXE shadow radii is the outer edge of the disc and its bloom. Beyond
+      // that there is nothing to draw, at any size.
+      const reach = hr * TEXE;
+      if (x + reach < 0 || x - reach > W || y + reach < 0 || y - reach > H) return;
 
-      // Light smeared around the shadow. Both the reach and the strength have
-      // to fall off as the horizon fills the frame, or the glow stops being a
-      // halo and becomes a fog over the whole screen.
-      const reach = Math.min(hr * 7, HALFDIAG * 1.15);
-      const near = 1 / (1 + Math.pow(hr / (HALFDIAG * 0.22), 1.6));
+      // Once the shadow itself is larger than the screen, every lit part of the
+      // hole is outside the frame. And at speed the disc is unreadable and
+      // ruinously expensive — but it has to fade rather than switch off, or a
+      // hole the size of the screen blinks as the streaks come up.
+      const structured = hr > 4 && hr < HALFDIAG * 1.05;
+      const feed = Math.min(1, alpha * h.feed) * Math.max(0, 1 - warp / 0.55);
+      const ext = hr * 2 * TEXE;
+
       ctx.globalCompositeOperation = 'lighter';
-      if (alpha * near > 0.04 && warp < 0.45) {
-        ctx.globalAlpha = alpha * near;
-        const lens = ctx.createRadialGradient(x, y, hr * 0.9, x, y, reach);
-        lens.addColorStop(0, 'rgba(255,220,175,0.55)');
-        lens.addColorStop(0.16, 'rgba(255,163,88,0.24)');
-        lens.addColorStop(0.5, 'rgba(150,110,235,0.09)');
-        lens.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.fillStyle = lens;
-        ctx.beginPath();
-        ctx.arc(x, y, reach, 0, TAU);
-        ctx.fill();
-      }
-
-      if (h.flash > 0) {
-        const s = hr * (8 + 44 * (1 - h.flash));
-        ctx.globalAlpha = alpha * h.flash * h.flash;
-        ctx.drawImage(glow('255,255,255', 128, 0.02, 2), x - s / 2, y - s / 2, s, s);
+      if (!structured) {
+        // Far off, a black hole is a point of hot light with a bite out of it.
+        if (hr < HALFDIAG * 1.05 && feed > 0.03) {
+          ctx.globalAlpha = feed * 0.5;
+          blitE(glow('255,196,120', 64, 0.05, 2.4), x, y,
+            hr * 3.4, hr * 3.4 * (0.35 + 0.65 * h.ci), h.cp, h.sp);
+        }
+      } else if (feed > 0.02) {
+        ctx.globalAlpha = feed;
+        blitT(discTex(h.qi, 0), x, y, ext, h.cp, h.sp, h.dir);
+        this._hotspots(x, y, hr, h, feed, 0);
       }
 
       // The one opaque thing on screen.
@@ -491,10 +924,10 @@
       ctx.fill();
 
       // And the universe behind it. Clipped to the horizon, so from far away it
-      // is a black disc and up close it is everything.
-      // Held back until the horizon is large on screen. Lit from across the
-      // galaxy it reads as a portal; a black hole at that distance is a black
-      // disc and nothing else.
+      // is a black disc and up close it is everything. Held back until the
+      // horizon is large on screen: lit from across the galaxy it reads as a
+      // portal, and a black hole at that distance is a black disc and nothing
+      // else.
       if (h.child) {
         const cr = hr * CHILD_FILL;
         if (cr > 15) {
@@ -507,31 +940,48 @@
         }
       }
 
-      // Photon ring, brighter on the approaching side. The width is capped so
-      // that up close it stays a rim of light rather than a white wall.
+      // The near side of the disc passes between us and the hole, so it goes on
+      // last — over the shadow, and over whatever is inside it.
       ctx.globalCompositeOperation = 'lighter';
-      const lw = Math.min(Math.max(0.8, hr * 0.13), 18);
-      const gx = Math.cos(h.spin) * hr, gy = Math.sin(h.spin) * hr;
-      const dg = ctx.createLinearGradient(x - gx, y - gy, x + gx, y + gy);
-      dg.addColorStop(0, 'rgba(255,255,255,0.95)');
-      dg.addColorStop(0.5, 'rgba(255,196,120,0.6)');
-      dg.addColorStop(1, 'rgba(186,122,255,0.32)');
-      ctx.strokeStyle = dg;
-      // A soft bloom under a crisp rim, so it reads as light rather than trim.
-      ctx.globalAlpha = alpha * Math.max(0.3, near) * 0.4;
-      ctx.lineWidth = lw * 3.5;
-      ctx.beginPath();
-      ctx.arc(x, y, hr + lw * 0.4, 0, TAU);
-      ctx.stroke();
-      ctx.globalAlpha = alpha * Math.max(0.72, near);
-      ctx.lineWidth = lw;
-      ctx.beginPath();
-      ctx.arc(x, y, hr + lw * 0.3, 0, TAU);
-      ctx.stroke();
+      if (structured && feed > 0.02) {
+        ctx.globalAlpha = feed;
+        blitT(discTex(h.qi, 1), x, y, ext, h.cp, h.sp, h.dir);
+        this._hotspots(x, y, hr, h, feed, 1);
+      }
 
       // Still going round, still on the same orbits, with nothing at the centre
       // to light them any more.
-      this._drawSystem(x, y, h.planets, hr / HOLE_R, alpha, true);
+      this._drawSystem(x, y, h.sys, hr / HOLE_R, alpha, 0.75);
+    }
+
+    /**
+     * Clumps orbiting in the disc. The baked texture cannot move, and a black
+     * hole that holds perfectly still is a decal; these are what make it boil.
+     */
+    _hotspots(x, y, hr, h, feed, pass) {
+      if (hr < 14) return;
+      const ci = h.ci, sn = Math.sqrt(1 - ci * ci);
+      for (let i = 0; i < 4; i++) {
+        const f = h.spin * (0.5 + i * 0.11) + i * 1.9;
+        const sf = Math.sin(f);
+        if ((sf > 0 ? 1 : 0) !== pass) continue;
+        const rho = (1.45 + i * 0.42) * hr;
+        const ry = pass ? rho * ci : Math.max(rho * (0.52 + 0.48 * ci), hr * 1.12);
+        const lx = rho * Math.cos(f) * h.dir, ly = ry * sf;
+        const px = x + lx * h.cp - ly * h.sp;
+        const py = y + lx * h.sp + ly * h.cp;
+        const s = hr * 0.5;
+        if (px + s * 3 < 0 || px - s * 3 > W || py + s * 3 < 0 || py - s * 3 > H) continue;
+        const dop = 1 + 0.42 * sn * Math.cos(f);
+        const a = feed * 0.16 * dop * dop * dop * (0.55 + 0.45 * Math.sin(h.spin * 2.3 + i));
+        if (a < 0.02) continue;
+        // Sheared out along its own orbit by the shear of the disc.
+        const tx = -Math.sin(f) * rho * h.dir, ty = ry * Math.cos(f);
+        const td = Math.hypot(tx, ty) || 1;
+        const cs = (tx * h.cp - ty * h.sp) / td, sns = (tx * h.sp + ty * h.cp) / td;
+        ctx.globalAlpha = Math.min(1, a);
+        blitR(glow('255,236,206', 64, 0, 2.6), px, py, s * 4.5, s * 1.3, cs, sns);
+      }
     }
   }
 
@@ -550,10 +1000,18 @@
   let camX = 0, camY = 0, zoom = 1, mode = 'hold', hold = 2.4, lock = 0;
   let time = 0, last = performance.now();
 
-  const baseR = () => Math.min(W, H) * 0.34;
+  const baseR = () => Math.min(W, H) * 0.38;
 
   /** The zoom at which this hole's child is drawn at exactly natural framing. */
   const framingZoom = (h) => 1 / (HOLE_R * h.size * h.open * CHILD_FILL);
+
+  /** Where a hole sits on screen, in the projected plane of its universe. */
+  function holePos(u, h, out) {
+    const lu = Math.cos(h.a) * h.rad, lv = Math.sin(h.a) * h.rad * u.ci;
+    out[0] = lu * u.cp - lv * u.sp;
+    out[1] = lu * u.sp + lv * u.cp;
+  }
+  const _hp = [0, 0];
 
   function camera(dt) {
     veil = Math.max(0, veil - dt / 0.8);
@@ -581,8 +1039,9 @@
     // of a radian is many screens. Ease onto it, then track it exactly.
     lock = Math.min(1, lock + dt / 1.2);
     const k = Math.max(lock * lock, Math.min(1, 4 * dt));
-    camX += (Math.cos(target.a) * target.rad - camX) * k;
-    camY += (Math.sin(target.a) * target.rad - camY) * k;
+    holePos(root, target, _hp);
+    camX += (_hp[0] - camX) * k;
+    camY += (_hp[1] - camY) * k;
 
     const zt = framingZoom(target);
     zoom *= Math.exp(DIVE_RATE * (mode === 'warp' ? WARP_BOOST : 1) * dt);
@@ -627,20 +1086,44 @@
     backdrop.width = Math.max(1, W);
     backdrop.height = Math.max(1, H);
     const g = backdrop.getContext('2d');
-    g.fillStyle = '#04030a';
+    g.fillStyle = '#030306';
     g.fillRect(0, 0, W, H);
-    const grd = g.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.7);
-    grd.addColorStop(0, 'rgba(36,26,72,0.5)');
-    grd.addColorStop(0.6, 'rgba(13,9,30,0.3)');
-    grd.addColorStop(1, 'rgba(3,2,8,0)');
-    g.fillStyle = grd;
-    g.fillRect(0, 0, W, H);
-    for (let i = 0; i < 380; i++) {
-      g.fillStyle = 'rgba(200,210,255,' + (Math.random() * 0.45 + 0.05).toFixed(3) + ')';
+
+    // Faint patchy cirrus rather than one smooth wash — a single centred
+    // gradient reads as a vignette in reverse and gives the whole frame away.
+    g.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 26; i++) {
+      const r = Math.max(W, H) * rand(0.08, 0.3);
+      const x = rand(-0.1, 1.1) * W, y = rand(-0.1, 1.1) * H;
+      const grd = g.createRadialGradient(x, y, 0, x, y, r);
+      const c = Math.random() < 0.5 ? '40,32,66' : '26,38,60';
+      grd.addColorStop(0, 'rgba(' + c + ',' + rand(0.05, 0.14).toFixed(3) + ')');
+      grd.addColorStop(1, 'rgba(' + c + ',0)');
+      g.fillStyle = grd;
+      g.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+
+    // Foreground stars, with a proper spread of brightness and colour: a few
+    // bright ones with visible haloes among a great many faint points.
+    for (let i = 0; i < 560; i++) {
+      const x = Math.random() * W, y = Math.random() * H;
+      const mag = Math.pow(Math.random(), 3.2);
+      const r = 0.25 + mag * 1.9;
+      const t = Math.random();
+      const c = t < 0.16 ? '255,206,168' : t < 0.34 ? '200,214,255' : '244,244,252';
+      if (mag > 0.55) {
+        const halo = g.createRadialGradient(x, y, 0, x, y, r * 6);
+        halo.addColorStop(0, 'rgba(' + c + ',' + (mag * 0.32).toFixed(3) + ')');
+        halo.addColorStop(1, 'rgba(' + c + ',0)');
+        g.fillStyle = halo;
+        g.fillRect(x - r * 6, y - r * 6, r * 12, r * 12);
+      }
+      g.fillStyle = 'rgba(' + c + ',' + (0.14 + mag * 0.8).toFixed(3) + ')';
       g.beginPath();
-      g.arc(Math.random() * W, Math.random() * H, Math.random() * 1.1 + 0.2, 0, TAU);
+      g.arc(x, y, r, 0, TAU);
       g.fill();
     }
+    g.globalCompositeOperation = 'source-over';
   }
 
   // ------------------------------------------------------------------- loop
@@ -699,9 +1182,9 @@
 
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
-    const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.44, W / 2, H / 2, HALFDIAG * 1.05);
+    const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.46, W / 2, H / 2, HALFDIAG * 1.05);
     vg.addColorStop(0, 'rgba(0,0,0,0)');
-    vg.addColorStop(1, 'rgba(0,0,0,0.5)');
+    vg.addColorStop(1, 'rgba(0,0,0,0.42)');
     ctx.fillStyle = vg;
     ctx.fillRect(0, 0, W, H);
 
@@ -710,6 +1193,8 @@
 
   window.addEventListener('resize', resize);
   resize();
+  // Bake every inclination up front: building one mid-dive would stall a frame.
+  for (let q = 0; q < QCI.length; q++) { discTex(q, 0); discTex(q, 1); }
   root = new Universe().prime();
   requestAnimationFrame(frame);
 
@@ -719,6 +1204,7 @@
     get warp() { return warp; }, get veil() { return veil; }, get occlude() { return occlude; },
     set paused(v) { paused = !!v; },
     get baseR() { return baseR(); },
+    tex(qi, pass) { return discTex(qi, pass).toDataURL(); },
   };
 })();
 </script>

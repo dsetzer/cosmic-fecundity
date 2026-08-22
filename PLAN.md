@@ -13,9 +13,8 @@ tool for testing a theory.
 
 ## Where things stand
 
-- **Live file:** `/tmp/claude-0/-home-user-cosmic-fecundity/9fc70798-d933-5592-8b7c-26b740578d5c/scratchpad/fecundity.html`
-  — single self-contained HTML, ~724 lines, no dependencies, no build step.
-  **Not in git. The container is ephemeral; this needs committing to survive.**
+- **Live file:** `fecundity.html` — single self-contained HTML, no dependencies,
+  no build step. In git.
 - **Repo branch:** `claude/cosmic-fecundity-simulation-nqqwor`, tip `b4a1f14`.
   Contains the earlier full N-body/multiverse codebase (`src/`, `tools/`).
   The user said they are not reusing that code — but they *did* like many of its
@@ -48,32 +47,30 @@ documentary.
 
 ---
 
-## Stage 1 — the look (do this first; no physics changes)
+## Stage 1 — the look — DONE
 
-Biggest payoff, lowest risk. This is where "primitive shapes" actually lives.
+1. **Inclination.** Every universe gets a tilt and a position angle, so discs,
+   orbits, dust lanes and accretion discs all project as ellipses. Each mote
+   carries a precomputed `cz`, so the bulge stays a rounded ellipsoid while the
+   disc foreshortens fully.
+2. **Every stroked circle gone.** Planet orbits are shown by the trail the
+   world leaves; supernovae are torn shells of ejecta; the photon ring is baked
+   out of beamed light rather than stroked.
+3. **Real black holes**, baked per inclination into a texture — see below.
+4. **Astrophysical colour and real darkness.** Warm bulge, blue-white arms,
+   pink Hα knots, an unresolved haze layer so the arms are luminosity rather
+   than glitter, and dust lanes silhouetted in front of all of it.
 
-1. **Inclination.** Random tilt + position angle per universe. Discs, orbits and
-   accretion discs project as ellipses. Two multiplies per particle. Keep the
-   bulge rounder than the disc so it does not read as a pancake edge-on.
-   Additive blending means no depth sorting is needed.
-2. **Delete every stroked circle.** Planet orbit rings, shockwave rings, the
-   photon hoop. Supernovae become irregular ejecta particles, not outlines.
-3. **Real black holes.** Inclined accretion disc; far side lensed *over and
-   under* the shadow (mirror the far half's projected y and push it outside the
-   photon ring); hot blue-white inner grading to orange outer; hard Doppler
-   beaming, roughly `(1 + 0.45·sin(inc)·cos φ)³`, so one side is several times
-   brighter. Thin, uneven photon ring.
-   Note: stellar remnants realistically would not all be feeding. Give fresh
-   remnants a bright fallback disc that fades; the nucleus keeps a persistent one.
-4. **Astrophysical colour, and actual darkness.** Warm old bulge, blue young
-   arms, pink Hα knots. Add **dust lanes silhouetted in front** — currently
-   every element is additive so nothing is ever dark, which is a large part of
-   why it reads as drawn rather than photographed. Dust is the first
-   non-additive element; draw after motes, before stars/holes.
-   Replace the neon NEBULA palette (teal/magenta) — it is the strongest
-   "digital artwork" tell.
+### How the black hole is built
 
-## Stage 2 — real gravity
+Six quantised inclinations x two passes = twelve textures, baked once at
+startup at 1024px covering ±4.9 shadow radii. Each carries the near half of the
+disc (in front of the shadow), the far half lensed up and over the top, the
+secondary image squeezed into a crescent underneath, and the photon ring. The
+sense of rotation is a horizontal mirror of the same texture, so it costs
+nothing extra. Per frame a hole is two blits.
+
+## Stage 2 — real gravity (next)
 
 Replace the kinematic rotation curve with actual forces: Barnes-Hut quadtree,
 gas that cools and clumps, stars igniting where density crosses a threshold
@@ -141,6 +138,39 @@ step required to run it.
   occlusion skipping, and length caps brought it to 16.7 ms.
 - **The whole piece is fill-rate bound**, not CPU bound. At quarter resolution
   it locks to 60 fps. Optimise overdraw, not arithmetic.
+
+### From Stage 1
+
+- **Bake the accretion disc; never stamp it per frame.** Sprite stamping along
+  the arcs beads up visibly unless the stamps overlap several times over, and
+  at that overlap it costs the whole frame budget. The shape depends only on
+  the inclination, which never changes for a given hole, so it belongs in a
+  texture.
+- **Beaming belongs in a gradient, not in segments.** On a ring of radius rho
+  the line-of-sight velocity goes as cos(azimuth), and cos(azimuth) is exactly
+  x/rho — so one horizontal `createLinearGradient` across the ring encodes the
+  Doppler boost precisely and the ring strokes in one piece. Chopping the ring
+  into segments to vary brightness leaves a seam at every join.
+- **Concentric strokes need heavy overlap or they rib.** Strokes have hard
+  edges, so a stack of them only reads as a smooth surface when any one of them
+  is a small fraction of the local total. At 2.4x overlap the plateaus showed as
+  concentric ridges; 260 rings at 7x overlap is smooth.
+- **Extend each arc a few hundredths of a radian past its endpoint**, or the
+  two halves of the disc leave a hairline seam along the major axis.
+- **Clip big texture blits to the screen.** A blit costs its area on the
+  destination. Falling into a hole the disc texture is many screens across, so
+  push the four screen corners back through the transform and draw only the
+  part of the source that can be seen. Worth 14ms a frame on its own.
+- **Fade the disc out with the warp; do not switch it off.** A hole the size of
+  the screen blinks otherwise.
+- **Orient dust along its own orbital tangent.** Oriented to the universe's
+  position angle instead, the lanes come out as parallel scratches across the
+  picture.
+- **The secondary lensed image is an edge-on effect.** Scale it by sin(inc) or
+  it becomes a bright blob under every face-on hole.
+- **Cull anything that has grown larger than the screen.** A haze blob or a
+  dust lane wider than the frame contributes a flat wash and costs a full-frame
+  blend to say so.
 
 ## Verification method that works
 
