@@ -115,6 +115,22 @@ Gas that cools and clumps, star formation triggered by density rather than by a
 timer. That needs a real solver and therefore a much smaller body count, or a
 grid. Worth doing only if the current motion still reads as fake.
 
+## The sky — DONE
+
+Reported: the star field felt stationary and disconnected from the spinning
+scene, and something zoomed out oddly after each transition.
+
+Both were the same cause. It was a bitmap scaled by the absolute zoom, so it
+barely moved during a dive (a log curve capped at 1.55x) and jumped backwards
+whenever the zoom was reset at a promotion. It is now the space the camera is
+actually travelling through: each star and drift of cloud carries a depth,
+sits at its offset over that depth, streams outward at a fraction of the dive
+rate, streaks on the same terms as everything else when the streaks come up,
+and slides across as the camera swings round the hole it is chasing.
+
+Measured over 75 s: stars stream outward at 4.5%/s holding, 16.6%/s diving and
+28.2%/s under warp, and in ~4,500 frames not one star ever moved inward.
+
 ## Stage 3 — interaction
 
 - Drag to pan, wheel to zoom about the cursor.
@@ -219,6 +235,26 @@ step required to run it.
 - **The near half of the disc has a straight top edge**, along the line joining
   its ansae. That is correct — it is the silhouette of a half-annulus — and was
   checked against an unclipped render before being left alone.
+
+### From the star field
+
+- **Never drive the sky from the absolute zoom.** The zoom is reset at every
+  promotion — exactly, so that nothing on screen moves — so anything reading it
+  lurches backwards at the one moment the picture is supposed to be perfectly
+  continuous. Drive it from the *rate* of the fall instead; then there is
+  nothing to reset.
+- **Ease that rate.** It drops to nothing the instant a universe is promoted,
+  and a sky that stops dead there is as jarring as one that jumps back.
+- **A field that recycles through a point drains its own edges.** Exponential
+  outward flow puts equal time into equal intervals of log r, so the density
+  settles at one over r squared and everything piles into the middle. Give each
+  thing a depth, place it at its offset over that depth, and recycle it at full
+  depth anywhere across the field of view.
+- **Mean radius is not a measure of how fast a recycling field is moving** — it
+  falls as the field speeds up, because more things recycle. Tag each with a
+  generation counter and follow the ones that did not.
+- **Cap planet discs and their trails.** Uncapped, a handful of them pile into
+  one saturated white slab that reads as a rendering fault.
 
 ## Verification method that works
 
