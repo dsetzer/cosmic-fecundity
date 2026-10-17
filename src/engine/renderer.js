@@ -29,11 +29,10 @@ export class Renderer {
     this.showLabels = true;
     this.showUmbilicals = true;
     this.bloomStrength = 0.45;
-    /** 0 = everything, 1 = no volumetric gas, 2 = no bloom either. Raised
-     *  automatically when frames get long so the simulation stays fluid on
-     *  modest hardware rather than degrading into a slideshow. */
+    /** 0 = everything, 1 = no volumetric gas, 2 = no bloom either. Fixed at
+     *  0: shedding the glow automatically made it flicker on and off as frame
+     *  times hovered around the threshold, which was worse than the cost. */
     this.quality = 0;
-    this._slow = 0;
     this.time = 0;
     this.pickables = [];
     this.resize();
@@ -113,154 +112,10 @@ export class Renderer {
     this._overlay(mv, transform);
   }
 
-  /** Watch the frame time and shed effects if we are consistently over budget. */
-  _adapt(dt) {
-    if (dt > 0.028) this._slow = Math.min(90, this._slow + 1);
-    else if (dt < 0.019) this._slow = Math.max(0, this._slow - 1);
-    if (this._slow > 60 && this.quality < 2) {
-      this.quality++;
-      this._slow = 20;
-    } else if (this._slow === 0 && this.quality > 0) {
-      this.quality--;
-      this._slow = 40;
-    }
-  }
+  /** Frame-time watcher. Kept as a hook, but it no longer sheds effects —
+   *  toggling the glow under load read as flicker. */
+  _adapt() {}
 
-  _detailFor(k, radius) {
-    const px = k * radius;
-    if (px < 3) return DETAIL.SKIP;
-    if (px < 30) return DETAIL.BLOB;
-    if (px < 150) return DETAIL.MEDIUM;
-    return DETAIL.FULL;
-  }
-
-  /**
-   * @param {Universe} u
-   * @param {{x:number,y:number,k:number}} T local→screen transform
-   */
-  _drawUniverse(u, T, depth) {
-    const detail = this._detailFor(T.k, u.radius);
-    if (detail === DETAIL.SKIP || depth > 4) return;
-
-    const R = u.radius * T.k;
-    // Cull anything entirely outside the viewport.
-    if (T.x + R < -40 || T.x - R > this.width + 40 || T.y + R < -40 || T.y - R > this.height + 40) return;
-
-    if (detail === DETAIL.BLOB) {
-      this._drawBlob(u, T);
-      return;
-    }
-
-    this._drawShell(u, T, detail);
-    this._drawParticles(u, T, detail);
-    this._drawStars(u, T, detail);
-
-    // Children are drawn before the black holes that host them, so the event
-    // horizon reads as being in front of its own offspring bubble.
-    for (const c of u.children) {
-      if (!c.visible) continue;
-      const Tc = {
-        x: T.x + c.anchorX * T.k,
-        y: T.y + c.anchorY * T.k,
-        k: T.k * (c.displayRadius / c.radius),
-      };
-      this._drawUniverse(c, Tc, depth + 1);
-    }
-
-    if (this.showUmbilicals) this._drawUmbilicals(u, T, detail);
-    this._drawBlackHoles(u, T, detail);
-
-    if (detail === DETAIL.FULL) {
-      this.pickables.push({ u, T });
-      this._drawBirthFlash(u, T);
-    }
-  }
-
-  /** A universe too small to resolve: one glowing mote plus a hint of scale. */
-  _drawBlob(u, T) {
-    const ctx = this.ctx;
-    const R = Math.max(2, u.radius * T.k);
-    const tint = u.tint;
-    ctx.globalCompositeOperation = 'lighter';
-    const sp = this.sprites.glow(tint, 32, 0.18, 1.7);
-    const s = R * 5;
-    ctx.globalAlpha = 0.75;
-    ctx.drawImage(sp, T.x - s / 2, T.y - s / 2, s, s);
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
-  }
-
-  /** Boundary of a closed space, plus the glow of everything inside it. */
-  _drawShell(u, T, detail) {
-    const ctx = this.ctx;
-    const R = u.radius * T.k;
-    const tint = u.tint;
-
-    ctx.globalCompositeOperation = 'lighter';
-    const grd = ctx.createRadialGradient(T.x, T.y, R * 0.55, T.x, T.y, R);
-    grd.addColorStop(0, 'rgba(0,0,0,0)');
-    grd.addColorStop(0.82, `rgba(${tint[0]},${tint[1]},${tint[2]},0.035)`);
-    grd.addColorStop(1, `rgba(${tint[0]},${tint[1]},${tint[2]},0.13)`);
-    ctx.fillStyle = grd;
-    ctx.beginPath();
-    ctx.arc(T.x, T.y, R, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.strokeStyle = `rgba(${tint[0]},${tint[1]},${tint[2]},${detail === DETAIL.FULL ? 0.3 : 0.5})`;
-    ctx.lineWidth = Math.max(0.6, R * 0.0022);
-    ctx.stroke();
-
-    // Inflation flash: the whole bubble is briefly opaque with light.
-    if (u.flash > 0.01) {
-      const f = u.flash * u.flash;
-      const fg = ctx.createRadialGradient(T.x, T.y, 0, T.x, T.y, R * 1.05);
-      fg.addColorStop(0, `rgba(255,255,255,${0.55 * f})`);
-      fg.addColorStop(0.35, `rgba(${tint[0]},${tint[1]},${tint[2]},${0.3 * f})`);
-      fg.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = fg;
-      ctx.beginPath();
-      ctx.arc(T.x, T.y, R * 1.05, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalCompositeOperation = 'source-over';
-  }
-
-  _drawParticles(u, T, detail) {
-    const ctx = this.ctx;
-    const p = u.pool;
-    const k = T.k;
-    ctx.globalCompositeOperation = 'lighter';
-
-    if (detail === DETAIL.FULL) {
-      // Two-layer gas: a wide, cool, tinted halo for volume, then a hot core
-      // per particle. Overlapping halos are what make a nebula read as a
-      // continuous medium rather than a field of dots.
-      if (this.quality < 1) this._nebula(p, T, k, u.tint);
-      this._pass(p, T, PT.GAS, k, 3.6, 0.46, false);
-      this._pass(p, T, PT.DUST, k, 3.4, 0.3, false);
-      this._pass(p, T, PT.INFLATON, k, 4.2, 0.7, false);
-      this._pass(p, T, PT.JET, k, 3.6, 0.65, false);
-      this._pass(p, T, PT.ACCRETION, k, 2.6, 0.8, false);
-      this._pass(p, T, PT.FLUX, k, 3.0, 0.85, false);
-      this._pass(p, T, PT.PHOTON, k, 1.5, 0.5, false);
-    } else {
-      // One cheap pass, every other particle, for out-of-focus bubbles.
-      const sp = this.sprites.glow(u.tint, 32, 0.14, 2.0);
-      ctx.globalAlpha = 0.5;
-      for (let i = 0; i <= p.high; i += 2) {
-        if (!p.alive[i]) continue;
-        const t = p.type[i];
-        if (t === PT.PHOTON) continue;
-        const s = Math.max(1.1, p.size[i] * 2.4 * k);
-        ctx.drawImage(sp, T.x + p.x[i] * k - s / 2, T.y + p.y[i] * k - s / 2, s, s);
-      }
-    }
-
-    ctx.globalAlpha = 1;
-    ctx.globalCompositeOperation = 'source-over';
-  }
-
-  /** Wide tinted halos, one per gas particle, in the universe's own hue. */
   _nebula(p, T, k, tint) {
     if (p.byType[PT.GAS] === 0) return;
     const ctx = this.ctx;
