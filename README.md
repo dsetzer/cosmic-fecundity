@@ -188,9 +188,11 @@ second run contains the first rather than replicating it — an agreement betwee
 evidence. (This bit me: an early "reproduced" result was two overlapping batches.)
 
 Finding a signal here needs the reproductive differential to survive into the census. The
-per-universe offspring cap is a memory bound and is deliberately set high enough not to
-bind, because a low cap silently discards the entire differential — a universe producing
-eight collapses a minute and one producing two both stop at the same number of children.
+per-universe offspring cap is two, which does bind: a universe that splits its matter many
+ways leaves every child too poor to reproduce, and lineages stalled two generations down.
+With the cap, the differential shows up as turnover — a fecund universe re-buds as its spent
+children are recycled — rather than as a standing head-count. Treat selection results with
+that in mind.
 
 ```bash
 node tools/shot.mjs 45 dist/shots/scene.png 60    # headless screenshot
@@ -203,7 +205,7 @@ DIVE=1 node tools/shot.mjs 45 dist/shots/child.png 60
   particles and bodies plus a grid-resolution self-gravity term; the cosmological potential
   is harmonic; accretion is kinematic. It is tuned to be legible and stable, not predictive.
 - Selection is real but the sample is small — a couple of dozen universes per seed over
-  twenty-five minutes, two or three generations deep. Individual runs disagree. Pool seeds
+  twenty-five minutes, about four generations deep. Individual runs disagree. Pool seeds
   with `tools/selection.mjs` and check the gene against the sweep before concluding
   anything; a drift in a gene with a flat landscape is noise by construction.
 - The collapse-rate chart is normalised per universe-minute precisely because deeper
