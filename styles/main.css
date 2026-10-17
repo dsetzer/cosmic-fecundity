@@ -262,6 +262,65 @@ body {
   border-radius: 1px;
   background: var(--text-muted);
 }
+.gene .parent {
+  position: absolute;
+  top: -4px;
+  width: 0;
+  height: 0;
+  margin-left: -4px;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid #ffd9a0;
+}
+.gene .delta {
+  grid-column: 2 / -1;
+  justify-self: end;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  margin-top: -16px;
+  color: var(--text-muted);
+}
+.gene .delta.up { color: #8fd0ff; }
+.gene .delta.down { color: #ffb08a; }
+.gene .delta.top { font-weight: 700; }
+.gene .delta.top::before { content: 'mutated ▸ '; font-weight: 400; opacity: 0.8; }
+.gene-key {
+  display: flex;
+  gap: 14px;
+  font-size: 9.5px;
+  color: var(--text-muted);
+  margin: -2px 0 8px;
+}
+.gene-key i {
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 5px;
+}
+.gene-key .k-parent {
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid #ffd9a0;
+}
+.gene-key .k-founder {
+  width: 2px;
+  height: 9px;
+  background: var(--text-muted);
+}
+.lineage {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  margin: 8px 0 2px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.lineage .arrow { color: var(--text-muted); }
+.tnode .mut {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: #ffd9a0;
+  opacity: 0.75;
+}
+
 .gene .val {
   font-family: var(--mono);
   font-size: 11px;

@@ -63,15 +63,27 @@ const BARREN_WINDOW = 110;
 
 /** Reservoir a black hole must bank before it can bounce into a new universe. */
 export const BIRTH_COST = 155;
+/** What a parent pays to bud a child. A fixed price would make every
+ *  generation harder than the last: a few-hundred-unit universe cannot save
+ *  what a six-thousand-unit one can, and the lineage would stall at its second
+ *  generation. So the price follows the parent's own wealth. It is still paid
+ *  out of the hole's savings and still arrives whole in the child. */
+export const BIRTH_COST_FLOOR = 10;
+export const BIRTH_COST_SHARE = 0.08;
+export function birthCost(parentMass) {
+  return Math.min(BIRTH_COST, Math.max(BIRTH_COST_FLOOR, parentMass * BIRTH_COST_SHARE));
+}
+
 /**
- * Offspring caps. These are a memory bound, and they must not bind in practice:
- * a low cap silently throws away the entire selective differential, because a
- * universe producing eight singularities a minute and one producing two both
- * stop at the same number of children. What limits the population is the
- * multiverse's own census and its recycling of spent branches, not this.
+ * Offspring caps. Kept low on purpose: a universe that splits its matter ten
+ * ways leaves every child too poor to reproduce, and the lineage stalls two
+ * generations down. With two, matter is concentrated enough to reach depth.
+ * The trade-off is that the cap binds, so the reproductive differential shows
+ * up as turnover (a fecund universe re-buds as its spent children are
+ * recycled) rather than as a standing head-count.
  */
-const MAX_CHILDREN_PER_BH = 6;
-const MAX_CHILDREN_PER_UNIVERSE = 10;
+const MAX_CHILDREN_PER_BH = 2;
+const MAX_CHILDREN_PER_UNIVERSE = 2;
 
 export const PHASE = {
   INFLATION: 0,
@@ -132,6 +144,10 @@ export class Universe {
     this.anchorX = 0;
     this.anchorY = 0;
     this.displayRadius = U_RADIUS * 0.13;
+    /** 0 → 1 while the bubble rises out of its parent's hole. */
+    this.emerge = parent ? 0 : 1;
+    /** What was inherited and how it mutated, set by Multiverse at birth. */
+    this.inheritance = null;
 
     /** Mass a cloud needs to ignite, and the yardstick for stellar collapse. */
     this.ignitionMass = IGNITION_BASE * genome.ignition;
@@ -850,15 +866,31 @@ export class Universe {
     for (let b = this.blackHoles.length - 1; b >= 0; b--) {
       const bh = this.blackHoles[b];
       bh.captureCap = this.radius * 0.06;
+
+      // A hole in the middle of falling into another does nothing else until
+      // it arrives; its mass is still counted here, so nothing is lost.
+      if (bh.mergeTarget) {
+        const t = bh.mergeTarget;
+        if (t.dead || t.mergeTarget || !this.blackHoles.includes(t)) {
+          bh.mergeTarget = null; // the one it was falling into is gone
+        } else {
+          if (bh.stepMerge(dt)) {
+            t.absorb(bh);
+            this.blackHoles.splice(b, 1);
+          }
+          continue;
+        }
+      }
       bh.update(dt);
 
       // --- bud off a child universe ---------------------------------------
       const canHost =
         bh.children.length < MAX_CHILDREN_PER_BH && this.children.length < MAX_CHILDREN_PER_UNIVERSE;
-      if (bh.bank >= BIRTH_COST && canHost && ctx.canBirth(this)) {
-        bh.bank -= BIRTH_COST;
+      const cost = birthCost(myMass);
+      if (bh.bank >= cost && canHost && ctx.canBirth(this)) {
+        bh.bank -= cost;
         bh.birthFlash = 1;
-        ctx.birth(this, bh, BIRTH_COST);
+        ctx.birth(this, bh, cost);
       }
       // A hole that has all the offspring it can host stops saving and puts
       // everything into throughput instead.
@@ -945,17 +977,17 @@ export class Universe {
     const holes = this.blackHoles;
     for (let i = 0; i < holes.length; i++) {
       const a = holes[i];
-      if (a.dead) continue;
+      if (a.dead || a.mergeTarget) continue;
       for (let j = i + 1; j < holes.length; j++) {
         const b = holes[j];
-        if (b.dead) continue;
+        if (b.dead || b.mergeTarget) continue;
         const dx = b.x - a.x;
         const dy = b.y - a.y;
-        const reach = (a.horizon + b.horizon) * 1.9;
+        const reach = (a.horizon + b.horizon) * 3.0;
         if (dx * dx + dy * dy > reach * reach) continue;
         const big = a.mass >= b.mass ? a : b;
         const small = big === a ? b : a;
-        big.absorb(small);
+        small.beginMerge(big);
         if (small === a) break;
       }
     }

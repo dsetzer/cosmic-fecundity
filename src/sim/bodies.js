@@ -9,6 +9,10 @@ import { blackbody } from '../engine/color.js';
 
 let nextBodyId = 1;
 
+/** How long two holes take to coalesce, once their horizons touch. */
+const MERGE_SECONDS = 2.1;
+const BANK_SHARE = 0.52;
+
 export class Star {
   constructor(x, y, vx, vy, mass, rng) {
     this.id = nextBodyId++;
@@ -88,6 +92,17 @@ export class BlackHole {
     /** Sub-quantum throughput waiting to become an umbilical quantum. */
     this.fluxPending = 0;
     this.dead = false;
+    /** The hole this one is falling into, while a merger plays out. The mass
+     *  stays where it is (and stays counted) until the merger completes. */
+    this.mergeTarget = null;
+    this.mergeT = 0;
+    this.mergeFromX = 0;
+    this.mergeFromY = 0;
+    /** 1 → 0 ripple on the survivor after it swallows another hole. */
+    this.mergePulse = 0;
+    /** Horizon as drawn: eases toward the true value so a merger grows the
+     *  survivor instead of popping it. */
+    this.shownHorizon = this.horizon;
   }
 
   /** Event horizon in world units. Schwarzschild radius is linear in mass, but
@@ -117,6 +132,39 @@ export class BlackHole {
     this.rateSmoothed += (this.accretionRate - this.rateSmoothed) * Math.min(1, dt * 2.2);
     this.accretionRate = 0;
     if (this.birthFlash > 0) this.birthFlash = Math.max(0, this.birthFlash - dt * 1.1);
+    if (this.mergePulse > 0) this.mergePulse = Math.max(0, this.mergePulse - dt * 0.65);
+    this.shownHorizon += (this.horizon - this.shownHorizon) * Math.min(1, dt * 3.2);
+  }
+
+  /** Begin falling into a larger hole. */
+  beginMerge(target) {
+    this.mergeTarget = target;
+    this.mergeT = 0;
+    // Held relative to the target, so the pair keeps orbiting together while
+    // the gap between them winds down.
+    this.mergeFromX = this.x - target.x;
+    this.mergeFromY = this.y - target.y;
+  }
+
+  /** Advance an in-progress merger. Returns true once the hole has arrived. */
+  stepMerge(dt) {
+    const t = this.mergeTarget;
+    this.age += dt;
+    this.diskPhase += dt * this.spin * 3.2;
+    this.shownHorizon += (this.horizon - this.shownHorizon) * Math.min(1, dt * 3.2);
+    this.mergeT = Math.min(1, this.mergeT + dt / MERGE_SECONDS);
+    // Slow at first, then a plunge: tidal stretching only becomes violent in
+    // the last stretch of the fall. The gap closes along an inspiral.
+    const e = this.mergeT * this.mergeT * (1.6 - 0.6 * this.mergeT);
+    const turn = e * 1.4 * this.spin;
+    const c = Math.cos(turn);
+    const s = Math.sin(turn);
+    const gap = 1 - e;
+    this.x = t.x + (this.mergeFromX * c - this.mergeFromY * s) * gap;
+    this.y = t.y + (this.mergeFromX * s + this.mergeFromY * c) * gap;
+    this.vx = t.vx;
+    this.vy = t.vy;
+    return this.mergeT >= 1;
   }
 
   /**
@@ -132,8 +180,8 @@ export class BlackHole {
     const keep = 0.16 * (240 / (240 + this.mass));
     const rest = 1 - keep;
     this.mass += m * keep;
-    this.bank += m * rest * 0.52; // savings toward the next universe
-    this.reservoir += m * rest * 0.48; // throughput: feeds offspring, or jets
+    this.bank += m * rest * BANK_SHARE; // savings toward the next universe
+    this.reservoir += m * rest * (1 - BANK_SHARE); // throughput: feeds offspring, or jets
     this.accretionRate += m;
     return this.bank;
   }
@@ -152,7 +200,8 @@ export class BlackHole {
     this.inflow += other.inflow;
     this.jetPending += other.jetPending;
     this.fluxPending += other.fluxPending;
-    this.birthFlash = Math.max(this.birthFlash, 0.8);
+    this.birthFlash = Math.max(this.birthFlash, 0.5);
+    this.mergePulse = 1;
     for (const c of other.children) {
       c.parentBH = this;
       this.children.push(c);

@@ -17,7 +17,9 @@ import { seedGenome, mutate, GENES, fecundity } from './genome.js';
 import { makeRNG, hashSeed } from '../engine/rng.js';
 import { resetBodyIds } from './bodies.js';
 
-const MAX_ACTIVE = 12;
+const MAX_ACTIVE = 18;
+/** Seconds a newborn universe takes to rise out of its parent's hole. */
+const EMERGE_SECONDS = 2.6;
 const ROOT_CAPACITY = 6800;
 const CHILD_CAPACITY = 3400;
 const ROOT_MASS = 6200;
@@ -124,9 +126,20 @@ export class Multiverse {
           const c = bh.children[i];
           if (!c.alive) continue;
           const spread = n === 1 ? 0 : (i / (n - 1) - 0.5) * 1.5;
-          c.anchorAngle = bh.jetAngle + Math.PI / 2 + spread;
-          c.anchorDist = bh.horizon * 2.4 + u.radius * 0.2 + i * u.radius * 0.04;
-          c.displayRadius = u.radius * 0.125;
+          const restAngle = bh.jetAngle + Math.PI / 2 + spread;
+          const restDist = bh.horizon * 2.4 + u.radius * 0.2 + i * u.radius * 0.04;
+          const restRadius = u.radius * 0.125;
+
+          // The bounce out: a newborn rises from the horizon along a gentle
+          // arc and swells into place, overshooting slightly and ringing down,
+          // rather than appearing at full size where it will end up.
+          const e = Math.min(1, c.age / EMERGE_SECONDS);
+          const travel = e >= 1 ? 1 : 1 - Math.pow(1 - e, 3);
+          const swell = e >= 1 ? 1 : 1 - Math.exp(-5 * e) * Math.cos(7.5 * e);
+          c.emerge = e;
+          c.anchorAngle = restAngle - (1 - travel) * 0.9 * u.spin;
+          c.anchorDist = bh.horizon * 0.6 + (restDist - bh.horizon * 0.6) * travel;
+          c.displayRadius = Math.max(restRadius * 0.02, restRadius * swell);
           c.anchorX = bh.x + Math.cos(c.anchorAngle) * c.anchorDist;
           c.anchorY = bh.y + Math.sin(c.anchorAngle) * c.anchorDist;
         }
@@ -159,12 +172,12 @@ export class Multiverse {
 
   _canBirth(u) {
     if (this.liveCount < MAX_ACTIVE) return true;
-    return this._cullCandidate() !== null;
+    return this._cullCandidate(u) !== null;
   }
 
   _birth(parent, bh, dowry) {
     if (this.liveCount >= MAX_ACTIVE) {
-      const victim = this._cullCandidate();
+      const victim = this._cullCandidate(parent);
       if (!victim) return null;
       this._dissolve(victim, 'crowded out of the multiverse');
     }
@@ -184,10 +197,14 @@ export class Multiverse {
     this._register(child, parent.record);
     this.births++;
 
-    const drifted = GENES.map((g) => {
+    // What the child got from its parent, and how it was changed in transit.
+    // The largest relative change is the one worth naming on screen.
+    const changes = GENES.map((g) => {
       const d = child.genome[g.key] - parent.genome[g.key];
-      return { g, d };
-    }).sort((a, b) => Math.abs(b.d) - Math.abs(a.d))[0];
+      return { g, d, rel: d / (g.hi - g.lo) };
+    }).sort((a, b) => Math.abs(b.rel) - Math.abs(a.rel));
+    const drifted = changes[0];
+    child.inheritance = { from: parent.id, changes };
     this.log(
       `Universe ${child.id} bounces out of a singularity in ${parent.id} — ` +
         `${drifted.g.symbol} ${drifted.d > 0 ? '+' : ''}${drifted.d.toFixed(2)}`,
@@ -197,10 +214,12 @@ export class Multiverse {
   }
 
   /** The least fecund expendable universe, or null if everything is protected. */
-  _cullCandidate() {
+  _cullCandidate(spender = null) {
     const protectedSet = new Set();
+    // The universe doing the budding, and everything above it, must survive
+    // the birth that is being paid for.
+    for (let u = spender; u; u = u.parent) protectedSet.add(u);
     for (let u = this.focus; u; u = u.parent) protectedSet.add(u);
-    for (const c of this.focus.children) protectedSet.add(c);
 
     let worst = null;
     let worstScore = Infinity;
@@ -211,7 +230,7 @@ export class Multiverse {
       if (u.children.some((c) => c.alive)) continue;
       // Shallow, infertile universes go first: a founder that keeps budding
       // barren children would otherwise pin the census at one generation.
-      const score = fecundity(u) + u.blackHolesFormed * 0.001 + u.generation * 0.02;
+      const score = fecundity(u) + u.blackHolesFormed * 0.001 + u.generation * 0.3;
       if (score < worstScore) {
         worstScore = score;
         worst = u;

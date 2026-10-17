@@ -41,6 +41,9 @@ export class HUD {
       focusPhase: el('focus-phase'),
       focusStats: el('focus-stats'),
       genes: el('focus-genes'),
+      inheritHint: el('inherit-hint'),
+      geneKey: el('gene-key'),
+      lineage: el('focus-lineage'),
       census: el('census'),
       ledger: el('ledger'),
       drift: el('drift'),
@@ -62,15 +65,18 @@ export class HUD {
       row.title = `${spec.label} — ${spec.note}`;
       row.innerHTML = `
         <span class="sym">${spec.symbol}</span>
-        <span class="track"><i class="fill"></i><i class="founder"></i></span>
+        <span class="track"><i class="fill"></i><i class="founder"></i><i class="parent"></i></span>
         <span class="val">0.00</span>
-        <span class="name">${spec.label}</span>`;
+        <span class="name">${spec.label}</span>
+        <span class="delta"></span>`;
       this.nodes.genes.appendChild(row);
       return {
         spec,
         fill: row.querySelector('.fill'),
         founder: row.querySelector('.founder'),
+        parent: row.querySelector('.parent'),
         val: row.querySelector('.val'),
+        delta: row.querySelector('.delta'),
       };
     });
   }
@@ -110,6 +116,11 @@ export class HUD {
     n.focusId.style.color = `rgb(${u.tint.join(',')})`;
     n.focusGen.textContent = `generation ${u.generation}`;
     n.focusPhase.textContent = PHASE_NAMES[u.phase];
+    const chain = [];
+    for (let a = u; a; a = a.parent) chain.unshift(a);
+    n.lineage.innerHTML = chain
+      .map((a) => `<span style="color:rgb(${generationColor(a.generation).join(',')})">U${a.id}</span>`)
+      .join('<span class="arrow"> → </span>');
 
     const born = u.blackHolesFormed;
     n.focusStats.innerHTML = `
@@ -121,13 +132,36 @@ export class HUD {
       ${stat(u.children.length, 'offspring')}`;
 
     const founder = mv.root.genome;
+    // The parent's genome is read from the census record, so it is still there
+    // after the parent itself has been recycled.
+    const parentRec = u.record && u.record.parent !== null ? mv.records.find((r) => r.id === u.record.parent) : null;
+    const parentGenome = parentRec ? parentRec.genome : null;
+    const top = u.inheritance ? u.inheritance.changes[0].g.key : null;
+    n.inheritHint.textContent = parentGenome
+      ? `copied from U${parentRec.id}, then mutated`
+      : 'the founding genome';
+    n.geneKey.style.display = parentGenome ? '' : 'none';
     for (const r of this.geneRows) {
-      const v = u.genome[r.spec.key];
-      const f = (v - r.spec.lo) / (r.spec.hi - r.spec.lo);
-      const fv = (founder[r.spec.key] - r.spec.lo) / (r.spec.hi - r.spec.lo);
+      const key = r.spec.key;
+      const range = r.spec.hi - r.spec.lo;
+      const v = u.genome[key];
+      const f = (v - r.spec.lo) / range;
+      const fv = (founder[key] - r.spec.lo) / range;
       r.fill.style.width = `${(f * 100).toFixed(1)}%`;
       r.founder.style.left = `${(fv * 100).toFixed(1)}%`;
       r.val.textContent = v.toFixed(2);
+      if (parentGenome) {
+        const pv = parentGenome[key];
+        const d = v - pv;
+        r.parent.style.display = '';
+        r.parent.style.left = `${(((pv - r.spec.lo) / range) * 100).toFixed(1)}%`;
+        r.delta.textContent = `${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(3)} vs U${parentRec.id}`;
+        r.delta.className = 'delta' + (key === top ? ' top' : '') + (Math.abs(d) < range * 0.004 ? ' same' : d > 0 ? ' up' : ' down');
+      } else {
+        r.parent.style.display = 'none';
+        r.delta.textContent = '';
+        r.delta.className = 'delta';
+      }
     }
   }
 
@@ -251,8 +285,12 @@ export class HUD {
         `<span style="width:${depth * 10}px"></span>` +
         `<span class="dot" style="background:rgb(${c.join(',')})"></span>` +
         `<span>U${u.id}</span>` +
+        (u.inheritance ? `<span class="mut">${mutTag(u.inheritance.changes[0])}</span>` : '') +
         `<span class="meta">${u.stars.length}★ ${u.blackHoles.length}● ${u.children.length}⇣</span>`;
-      node.title = `Universe ${u.id}, generation ${u.generation} — click to travel here`;
+      node.title =
+        `Universe ${u.id}, generation ${u.generation}` +
+        (u.inheritance ? ` — inherits U${u.inheritance.from}'s constants, biggest change ${mutTag(u.inheritance.changes[0])}` : '') +
+        ' — click to travel here';
       node.tabIndex = 0;
       node.setAttribute('role', 'button');
       node.addEventListener('click', () => this.onSelect(u));
@@ -278,6 +316,10 @@ export class HUD {
     }
     this.nodes.log.replaceChildren(frag);
   }
+}
+
+export function mutTag(c) {
+  return `${c.g.symbol}${c.d >= 0 ? '+' : '−'}${Math.abs(c.d).toFixed(2)}`;
 }
 
 function stat(v, label) {
