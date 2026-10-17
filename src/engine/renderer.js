@@ -429,6 +429,14 @@ export class Renderer {
       }
       ctx.globalCompositeOperation = 'source-over';
     }
+
+    // The infalling hole's light goes on last, over the survivor's shadow, so
+    // its final flare is seen right up to the moment it gutters out inside.
+    for (const bh of u.blackHoles) {
+      if (!bh.mergeTarget) continue;
+      const h = Math.max(1.2, bh.shownHorizon * k);
+      this._drawMergingGlow(bh, h, T.x + bh.x * k, T.y + bh.y * k);
+    }
   }
 
   /**
@@ -505,70 +513,72 @@ export class Renderer {
     ctx.stroke();
     ctx.restore();
 
-    // The last moments light up: the gap between the two horizons is where
-    // the energy comes out, and the glare hides the hand-off.
-    if (e > 0.55) {
-      const g = (e - 0.55) / 0.45;
-      const mx = x + dx * 0.5;
-      const my = y + dy * 0.5;
-      const gs = h * (3 + 7 * g);
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.globalAlpha = g * g;
-      ctx.drawImage(this.sprites.glow([255, 240, 215], 64, 0.12, 1.8), mx - gs / 2, my - gs / 2, gs, gs);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  /**
+   * As the orbit tightens the infalling hole's disc is squeezed and heated, so
+   * it brightens steadily — amber, then white — all the way in. Once it is
+   * across the survivor's horizon its light gutters: it shrinks, flickers and
+   * goes out, leaving a few embers falling after it.
+   */
+  _drawMergingGlow(bh, h, x, y) {
+    const ctx = this.ctx;
+    const e = bh.mergeT;
+    const heat = Math.pow(e, 1.6);
+    const gone = Math.min(1, Math.max(0, (e - 0.8) / 0.2));
+    if (gone >= 1) return;
+    const flicker = gone > 0 ? 0.55 + 0.45 * Math.sin(this.time * 55 + bh.id * 1.7) : 1;
+    const live = Math.pow(1 - gone, 1.5) * flicker;
+    const shrink = 1 - 0.8 * gone;
+
+    ctx.globalCompositeOperation = 'lighter';
+    const col = [255, Math.round(200 + 50 * heat), Math.round(150 + 100 * heat)];
+    const gs = h * (2.4 + 4 * heat) * shrink;
+    ctx.globalAlpha = Math.min(1, (0.12 + 0.9 * heat) * live);
+    ctx.drawImage(this.sprites.glow(col, 64, 0.1, 1.9), x - gs / 2, y - gs / 2, gs, gs);
+    const cs = h * (1.2 + 1.6 * heat) * shrink;
+    ctx.globalAlpha = Math.min(1, heat * heat * live);
+    ctx.drawImage(this.sprites.glow([255, 255, 255], 64, 0.35, 1.4), x - cs / 2, y - cs / 2, cs, cs);
+
+    // The photon ring, running hot.
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = `rgba(255,${Math.round(220 + 35 * heat)},${Math.round(170 + 85 * heat)},${Math.min(1, (0.3 + 0.7 * heat) * live)})`;
+    ctx.lineWidth = Math.max(0.7, h * (0.18 + 0.2 * heat) * shrink);
+    ctx.beginPath();
+    ctx.arc(x, y, h * 1.25 * shrink, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Embers left behind as it goes out, drawn down after it.
+    if (gone > 0) {
+      const ember = this.sprites.glow([255, 210, 150], 32, 0.25, 1.6);
+      for (let i = 0; i < 8; i++) {
+        const a = hash01(bh.id * 53 + i * 11) * Math.PI * 2 + this.time * 2;
+        const r = h * (0.6 + 1.6 * hash01(bh.id * 17 + i)) * (1 - gone);
+        const es = Math.max(1.5, h * 0.35 * (1 - gone));
+        ctx.globalAlpha = (1 - gone) * (0.5 + 0.5 * hash01(bh.id + i * 29));
+        ctx.drawImage(ember, x + Math.cos(a) * r - es / 2, y + Math.sin(a) * r - es / 2, es, es);
+      }
     }
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
   }
 
   /**
-   * The moment of coalescence: a flash of released energy, a spray of hot
-   * debris flung out of the shared disc, and the survivor ringing down.
+   * After the light has gone out, the survivor rings down: two faint
+   * gravitational-wave ripples spreading from the merged horizon.
    */
   _drawMergeRipple(bh, x, y, h) {
     const ctx = this.ctx;
     const p = bh.mergePulse;
-    const q = 1 - p;
     ctx.globalCompositeOperation = 'lighter';
-
-    // Flash: brightest at the instant of contact, swelling as it fades.
-    const fs = h * (7 + 16 * q);
-    ctx.globalAlpha = Math.min(1, p * p * 1.3);
-    ctx.drawImage(this.sprites.glow([255, 244, 220], 64, 0.08, 1.8), x - fs / 2, y - fs / 2, fs, fs);
-    const cs = h * (3 + 4 * q);
-    ctx.globalAlpha = p * p * p;
-    ctx.drawImage(this.sprites.glow([255, 255, 255], 64, 0.3, 1.4), x - cs / 2, y - cs / 2, cs, cs);
-
-    // Sparks: fixed directions per hole, so the burst is stable frame to frame.
-    const spark = this.sprites.glow([255, 214, 150], 32, 0.25, 1.6);
-    const n = 22;
-    for (let i = 0; i < n; i++) {
-      const r1 = hash01(bh.id * 97 + i * 13);
-      const r2 = hash01(bh.id * 31 + i * 7 + 5);
-      const a = (i / n) * Math.PI * 2 + r1 * 0.5;
-      const fly = 1 - (1 - q) * (1 - q) * (1 - q);
-      const dist = h * (1.3 + fly * (5 + 11 * r2));
-      const sx = x + Math.cos(a) * dist;
-      const sy = y + Math.sin(a) * dist;
-      const len = h * (0.8 + 2.4 * r2) * Math.sqrt(p);
-      ctx.globalAlpha = Math.min(1, Math.pow(p, 0.7) * (0.7 + 0.5 * r1));
-      ctx.strokeStyle = r1 > 0.75 ? 'rgba(190,215,255,0.9)' : 'rgba(255,220,170,0.9)';
-      ctx.lineWidth = Math.max(0.8, h * 0.16 * Math.sqrt(p));
-      ctx.beginPath();
-      ctx.moveTo(sx, sy);
-      ctx.lineTo(sx - Math.cos(a) * len, sy - Math.sin(a) * len);
-      ctx.stroke();
-      const ss = Math.max(3, h * 0.9 * Math.sqrt(p));
-      ctx.drawImage(spark, sx - ss / 2, sy - ss / 2, ss, ss);
-    }
-    ctx.globalAlpha = 1;
-
-    // Ringdown.
     for (let i = 0; i < 2; i++) {
       const w = Math.max(0, p - i * 0.18);
       if (w <= 0) continue;
       const r = h * (1.4 + (1 - w) * (5 + i * 3));
-      ctx.strokeStyle = `rgba(210,225,255,${0.55 * w * w})`;
-      ctx.lineWidth = Math.max(0.8, h * 0.14 * w);
+      ctx.strokeStyle = `rgba(210,225,255,${0.4 * w * w})`;
+      ctx.lineWidth = Math.max(0.8, h * 0.12 * w);
       ctx.beginPath();
       ctx.arc(x, y, r, 0, Math.PI * 2);
       ctx.stroke();

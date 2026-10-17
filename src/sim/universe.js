@@ -868,16 +868,12 @@ export class Universe {
       bh.captureCap = this.radius * 0.06;
 
       // A hole in the middle of falling into another does nothing else until
-      // it arrives; its mass is still counted here, so nothing is lost.
+      // it arrives (see below); its mass is still counted, so nothing is lost.
       if (bh.mergeTarget) {
         const t = bh.mergeTarget;
         if (t.dead || t.mergeTarget || !this.blackHoles.includes(t)) {
           bh.mergeTarget = null; // the one it was falling into is gone
         } else {
-          if (bh.stepMerge(dt)) {
-            t.absorb(bh);
-            this.blackHoles.splice(b, 1);
-          }
           continue;
         }
       }
@@ -963,6 +959,17 @@ export class Universe {
         this.reservoir +=
           bh.mass + bh.bank + bh.reservoir + bh.backflow + bh.inflow + bh.jetPending + bh.fluxPending;
         bh.dead = true;
+        this.blackHoles.splice(b, 1);
+      }
+    }
+
+    // Mergers advance only once every survivor has moved this frame, so the
+    // infalling hole is placed against where its target is, not where it was.
+    for (let b = this.blackHoles.length - 1; b >= 0; b--) {
+      const bh = this.blackHoles[b];
+      if (!bh.mergeTarget) continue;
+      if (bh.stepMerge(dt)) {
+        bh.mergeTarget.absorb(bh);
         this.blackHoles.splice(b, 1);
       }
     }

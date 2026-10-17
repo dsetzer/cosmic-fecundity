@@ -144,6 +144,13 @@ export class BlackHole {
     // the gap between them winds down.
     this.mergeFromX = this.x - target.x;
     this.mergeFromY = this.y - target.y;
+    // The motion it already had, in the target's frame. The fall starts from
+    // this rather than from rest, so nothing jerks when the merger begins.
+    this.mergeVX = this.vx - target.vx;
+    this.mergeVY = this.vy - target.vy;
+    // Spiral the way it was already going round, not the way its disc spins.
+    const L = this.mergeFromX * this.mergeVY - this.mergeFromY * this.mergeVX;
+    this.mergeDir = L === 0 ? this.spin : Math.sign(L);
   }
 
   /** Advance an in-progress merger. Returns true once the hole has arrived. */
@@ -153,17 +160,40 @@ export class BlackHole {
     this.diskPhase += dt * this.spin * 3.2;
     this.shownHorizon += (this.horizon - this.shownHorizon) * Math.min(1, dt * 3.2);
     this.mergeT = Math.min(1, this.mergeT + dt / MERGE_SECONDS);
-    // Slow at first, then a plunge: tidal stretching only becomes violent in
-    // the last stretch of the fall. The gap closes along an inspiral.
-    const e = this.mergeT * this.mergeT * (1.6 - 0.6 * this.mergeT);
-    const turn = e * 1.4 * this.spin;
+    const m = this.mergeT;
+
+    // Where its own momentum would carry it, eased off so it cannot coast far.
+    const tau = m * MERGE_SECONDS;
+    const coast = (1 - Math.exp(-1.5 * tau)) / 1.5;
+    const fx = this.mergeFromX + this.mergeVX * coast;
+    const fy = this.mergeFromY + this.mergeVY * coast;
+
+    // The scripted inspiral: slow at first, then a plunge, so tidal
+    // stretching only turns violent in the last stretch of the fall.
+    const e = m * m * (1.6 - 0.6 * m);
+    const turn = e * 1.4 * this.mergeDir;
     const c = Math.cos(turn);
     const s = Math.sin(turn);
     const gap = 1 - e;
-    this.x = t.x + (this.mergeFromX * c - this.mergeFromY * s) * gap;
-    this.y = t.y + (this.mergeFromX * s + this.mergeFromY * c) * gap;
-    this.vx = t.vx;
-    this.vy = t.vy;
+    const sx = (this.mergeFromX * c - this.mergeFromY * s) * gap;
+    const sy = (this.mergeFromX * s + this.mergeFromY * c) * gap;
+
+    // Hand over from coasting to the inspiral with zero slope at both ends:
+    // it leaves with the velocity it had and arrives exactly on target.
+    const w = m * m * (3 - 2 * m);
+    const nx = t.x + fx + (sx - fx) * w;
+    const ny = t.y + fy + (sy - fy) * w;
+    if (dt > 0) {
+      this.vx = (nx - this.x) / dt;
+      this.vy = (ny - this.y) / dt;
+    }
+    this.x = nx;
+    this.y = ny;
+    if (m >= 1) {
+      // Arrived: it moves with the survivor, so absorbing it adds no kick.
+      this.vx = t.vx;
+      this.vy = t.vy;
+    }
     return this.mergeT >= 1;
   }
 
@@ -200,7 +230,6 @@ export class BlackHole {
     this.inflow += other.inflow;
     this.jetPending += other.jetPending;
     this.fluxPending += other.fluxPending;
-    this.birthFlash = Math.max(this.birthFlash, 0.5);
     this.mergePulse = 1;
     for (const c of other.children) {
       c.parentBH = this;
